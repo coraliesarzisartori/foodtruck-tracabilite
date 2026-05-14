@@ -380,7 +380,7 @@ def page_reception():
     elif step == 3:
         nb = st.session_state.get("rec_nb_produits", 0)
         st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} enregistree avec {nb} produit(s) !")
-        st.balloons()
+        
         if st.button("📦 Nouvelle reception"):
             for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
                 st.session_state.pop(k, None)
@@ -440,7 +440,7 @@ def page_preparation():
                 db.commit()
                 db.close()
                 st.success(f"✅ Preparation #{prep_id} enregistree avec {len(selectionnes)} produit(s) !")
-                st.balloons()
+                
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
