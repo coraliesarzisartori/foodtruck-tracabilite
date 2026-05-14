@@ -545,26 +545,56 @@ def page_reception():
     with onglet_rec:
         step = st.session_state.get("rec_step", 1)
 
+        # ── ETAPE 1 : BL + Facture + Infos livraison ─────────────
         if step == 1:
-            st.markdown('<div class="step-indicator">Etape 1 / 3 — Bon de livraison</div>', unsafe_allow_html=True)
-            photo = st.camera_input("📷 Photo du BL", key="cam_bl")
-            if not photo:
-                photo = st.file_uploader("Ou importe depuis la galerie", type=["jpg","jpeg","png"], key="up_bl")
+            st.markdown('<div class="step-indicator">📋 Etape 1 / 3 — BL + Facture</div>', unsafe_allow_html=True)
+
+            # --- Photo BL ---
+            st.markdown("**📷 Photo du Bon de Livraison**")
+            photo_bl = st.camera_input("Prends une photo du BL", key="cam_bl")
+            if not photo_bl:
+                photo_bl = st.file_uploader("Ou importe depuis la galerie", type=["jpg","jpeg","png"], key="up_bl")
 
             bl_data = st.session_state.get("bl_data", {})
-
-            if photo:
-                st.image(photo, use_container_width=True)
-                if st.button("🤖 Lire automatiquement", key="btn_bl"):
-                    with st.spinner("Lecture en cours..."):
-                        data = lire_bl(photo.getvalue())
+            if photo_bl:
+                st.image(photo_bl, use_container_width=True)
+                if st.button("🤖 Lire le BL automatiquement", key="btn_bl"):
+                    with st.spinner("Lecture BL en cours..."):
+                        data = lire_bl(photo_bl.getvalue())
                     if data and "erreur" not in data:
                         st.session_state.bl_data = data
                         bl_data = data
-                        st.success("✅ BL lu !")
+                        st.success(f"✅ N° BL : {data.get('numero_bl','?')}  •  Fournisseur : {data.get('fournisseur','?')}")
                     else:
-                        st.error(data.get("erreur","Erreur") if data else "Erreur")
+                        st.error(data.get("erreur","Erreur lecture BL") if data else "Erreur")
 
+            st.divider()
+
+            # --- Photo / Upload Facture ---
+            st.markdown("**📄 Facture (optionnel — ou elle viendra par email)**")
+            facture_source = st.radio("Ajouter la facture maintenant ?", ["Non, plus tard", "Photo", "Fichier PDF/image"], horizontal=True, key="fac_source")
+            facture_bytes = None
+            facture_name  = None
+
+            if facture_source == "Photo":
+                fac_photo = st.camera_input("📷 Photo de la facture", key="cam_fac")
+                if fac_photo:
+                    facture_bytes = fac_photo.getvalue()
+                    facture_name  = f"facture_{date.today()}.jpg"
+                    st.image(fac_photo, use_container_width=True)
+
+            elif facture_source == "Fichier PDF/image":
+                fac_file = st.file_uploader("Importe la facture", type=["pdf","jpg","jpeg","png"], key="up_fac")
+                if fac_file:
+                    facture_bytes = fac_file.getvalue()
+                    facture_name  = fac_file.name
+
+            if facture_bytes:
+                st.success(f"✅ Facture prete : {facture_name}")
+
+            st.divider()
+
+            # --- Formulaire livraison ---
             fournisseurs = get_fournisseurs()
             if not fournisseurs:
                 st.warning("Aucun fournisseur. Va dans Config pour en ajouter.")
@@ -579,30 +609,44 @@ def page_reception():
                         default = i; break
 
             with st.form("form_bl"):
+                st.markdown("**📝 Informations livraison**")
                 fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
                 numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
                 date_rec   = st.date_input("Date de reception", value=date.today())
-                temp       = st.number_input("Température (°C)", value=4.0, step=0.5)
+                temp       = st.number_input("🌡️ Temperature a reception (°C)", value=4.0, step=0.5)
                 conformite = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
-                notes      = st.text_area("Notes", placeholder="Remarques...")
-                if st.form_submit_button("✅ Valider →"):
+                notes      = st.text_area("Notes", placeholder="Remarques sur la livraison...")
+                if st.form_submit_button("✅ Valider → Etape suivante"):
                     fourn_id = ids[noms.index(fourn_sel)]
                     db = conn()
                     cur = db.execute(
                         "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?,?)",
                         (fourn_id, numero_bl.strip() or None, date_rec, temp, conformite, notes)
                     )
+                    livraison_id = cur.lastrowid
                     db.commit()
-                    st.session_state.rec_livraison_id   = cur.lastrowid
+                    # Sauvegarde facture si fournie
+                    if facture_bytes and facture_name:
+                        fac_b64 = base64.b64encode(facture_bytes).decode("utf-8")
+                        db.execute(
+                            "INSERT INTO factures (livraison_id,nom_fichier,contenu_b64,expediteur,sujet,date_email) VALUES (?,?,?,?,?,?)",
+                            (livraison_id, facture_name, fac_b64, "upload_direct", f"Facture BL {numero_bl.strip()}", str(date_rec))
+                        )
+                        db.commit()
+                    db.close()
+                    st.session_state.rec_livraison_id   = livraison_id
                     st.session_state.rec_fournisseur_id = fourn_id
                     st.session_state.rec_nb_produits    = 0
                     st.session_state.rec_step           = 2
-                    db.close()
                     st.rerun()
 
+        # ── ETAPE 2 : Étiquettes produits ────────────────────────
         elif step == 2:
             nb = st.session_state.get("rec_nb_produits", 0)
-            st.markdown(f'<div class="step-indicator">Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="step-indicator">🏷️ Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
+
+            if nb > 0:
+                st.info(f"✅ {nb} produit(s) deja enregistre(s) — photo de l'etiquette suivante ou termine.")
 
             photo = st.camera_input("📷 Photo de l'etiquette", key=f"cam_et_{nb}")
             if not photo:
@@ -633,7 +677,7 @@ def page_reception():
                 dlc = st.date_input("DLC", value=dlc_default)
 
                 col1, col2 = st.columns(2)
-                with col1: encore   = st.form_submit_button("💾 Enregistrer + suivant")
+                with col1: encore   = st.form_submit_button("💾 + Produit suivant")
                 with col2: terminer = st.form_submit_button("✅ Terminer")
 
                 if encore or terminer:
@@ -652,14 +696,58 @@ def page_reception():
                         if terminer: st.session_state.rec_step = 3
                         st.rerun()
 
-            if st.button("➡️ Terminer sans ajouter"):
+            if st.button("➡️ Terminer sans ajouter de produit"):
                 st.session_state.rec_step = 3
                 st.rerun()
 
+        # ── ETAPE 3 : Récap dossier BL ───────────────────────────
         elif step == 3:
-            nb = st.session_state.get("rec_nb_produits", 0)
-            st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} — {nb} produit(s) enregistre(s) !")
-            if st.button("📦 Nouvelle reception"):
+            st.markdown('<div class="step-indicator">✅ Etape 3 / 3 — Dossier complet</div>', unsafe_allow_html=True)
+
+            liv_id   = st.session_state.rec_livraison_id
+            db       = conn()
+            livraison = db.execute("""
+                SELECT l.*, f.nom AS nom_fourn FROM livraisons l
+                JOIN fournisseurs f ON l.fournisseur_id = f.id
+                WHERE l.id = ?
+            """, (liv_id,)).fetchone()
+            db.close()
+
+            if livraison:
+                conf_icon = "✅" if livraison['conformite'] == "conforme" else ("⚠️" if livraison['conformite'] == "avec reserve" else "❌")
+                st.markdown(f"""<div class="card">
+                    <h4>📋 BL : {livraison['numero_bl'] or 'non renseigne'}</h4>
+                    <b>Fournisseur :</b> {livraison['nom_fourn']}<br>
+                    <b>Date :</b> {livraison['date_reception']}<br>
+                    <b>Temperature :</b> {livraison['temperature']}°C<br>
+                    <b>Conformite :</b> {conf_icon} {livraison['conformite']}<br>
+                    {f"<b>Notes :</b> {livraison['notes']}" if livraison['notes'] else ""}
+                </div>""", unsafe_allow_html=True)
+
+            produits = get_produits_livraison(liv_id)
+            if produits:
+                st.markdown(f"**🏷️ {len(produits)} produit(s) :**")
+                for p in produits:
+                    lot = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
+                    dlc = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
+                    st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
+                        <strong>{p['nom']}</strong> &nbsp;
+                        <span class="badge-lot">{lot}</span>&nbsp;
+                        <span class="badge-dlc">{dlc}</span>
+                    </div>""", unsafe_allow_html=True)
+
+            factures = get_factures(liv_id)
+            if factures:
+                st.markdown(f"**📎 {len(factures)} facture(s) liee(s)**")
+                for fac in factures:
+                    mime = "application/pdf" if fac['nom_fichier'].endswith(".pdf") else "image/jpeg"
+                    st.download_button(f"📥 {fac['nom_fichier']}", base64.b64decode(fac['contenu_b64']),
+                                       fac['nom_fichier'], mime, key=f"recap_dl_{fac['id']}")
+            else:
+                st.caption("Pas de facture liee — elle viendra automatiquement depuis Gmail si le N° BL correspond.")
+
+            st.success("🎉 Dossier HACCP complet !")
+            if st.button("📦 Nouvelle reception", use_container_width=True):
                 for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
                     st.session_state.pop(k, None)
                 st.rerun()
