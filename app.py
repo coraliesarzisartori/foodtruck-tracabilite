@@ -1,8 +1,9 @@
 import streamlit as st
 import sqlite3
 import json
+import base64
+import requests
 from datetime import datetime, date
-import google.generativeai as genai
 from PIL import Image, ImageEnhance
 import io
 import pandas as pd
@@ -48,13 +49,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI SETUP — gemini-1.5-pro : gratuit + meilleur OCR
+#  GEMINI SETUP — via API REST directe (pas de librairie)
 # ═══════════════════════════════════════════════════════════════
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
+    GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     GEMINI_OK = True
 except Exception:
+    GEMINI_KEY = None
     GEMINI_OK = False
 
 # ═══════════════════════════════════════════════════════════════
@@ -118,7 +120,8 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
-def preparer_image(image_data):
+def image_en_base64(image_data):
+    """Convertit et optimise une image en base64 pour l'API Gemini."""
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -128,55 +131,57 @@ def preparer_image(image_data):
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(1.5)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
-    return img
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-def parser_json(text):
-    text = text.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    return json.loads(text)
+def appeler_gemini(prompt, image_data):
+    """Appel direct API REST Gemini — sans librairie tierce."""
+    if not GEMINI_OK:
+        return {"erreur": "Cle API non configuree"}
+    try:
+        img_b64 = image_en_base64(image_data)
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }]
+        }
+        resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"erreur": str(e)}
 
 def lire_bl(image_data):
-    if not GEMINI_OK:
-        return {"erreur": "Cle API non configuree"}
-    try:
-        img = preparer_image(image_data)
-        prompt = (
-            "Tu es un expert en lecture de documents alimentaires. "
-            "Analyse ce bon de livraison et extrais les infos. "
-            "Reponds UNIQUEMENT en JSON valide: "
-            "{\"fournisseur\": \"nom societe fournisseur\", "
-            "\"date\": \"YYYY-MM-DD\", "
-            "\"produits\": [{\"nom\": \"nom produit\", \"quantite\": \"qte + unite\"}]} "
-            "Si une info manque mets null."
-        )
-        response = model.generate_content([prompt, img])
-        return parser_json(response.text)
-    except Exception as e:
-        return {"erreur": str(e)}
+    prompt = (
+        "Analyse ce bon de livraison alimentaire. "
+        "Reponds UNIQUEMENT en JSON valide: "
+        "{\"fournisseur\": \"nom societe\", \"date\": \"YYYY-MM-DD\", "
+        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
+        "Si une info manque mets null."
+    )
+    return appeler_gemini(prompt, image_data)
 
 def lire_etiquette(image_data):
-    if not GEMINI_OK:
-        return {"erreur": "Cle API non configuree"}
-    try:
-        img = preparer_image(image_data)
-        prompt = (
-            "Tu es un expert OCR specialise en etiquettes alimentaires. "
-            "Lis TOUT le texte visible sur cette etiquette. "
-            "Reponds UNIQUEMENT en JSON valide: "
-            "{\"_texte_brut\": \"tout le texte mot pour mot\", "
-            "\"nom_produit\": \"nom complet du produit\", "
-            "\"marque\": \"marque ou fabricant\", "
-            "\"numero_lot\": \"numero de lot EXACT (cherche LOT Lot n L Batch)\", "
-            "\"dlc\": \"date limite YYYY-MM-DD (cherche DLC DDM BBD A consommer avant - convertis JJ/MM/AA)\"} "
-            "Si absent mets null. Inclus les chiffres meme si contexte incertain."
-        )
-        response = model.generate_content([prompt, img])
-        return parser_json(response.text)
-    except Exception as e:
-        return {"erreur": str(e)}
+    prompt = (
+        "Lis TOUT le texte de cette etiquette alimentaire. "
+        "Reponds UNIQUEMENT en JSON valide: "
+        "{\"_texte_brut\": \"tout le texte mot pour mot\", "
+        "\"nom_produit\": \"nom du produit\", "
+        "\"marque\": \"marque\", "
+        "\"numero_lot\": \"numero de lot (cherche LOT L: Batch)\", "
+        "\"dlc\": \"date limite YYYY-MM-DD (cherche DLC DDM BBD)\"} "
+        "Si absent mets null."
+    )
+    return appeler_gemini(prompt, image_data)
 
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS BASE DE DONNEES
