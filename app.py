@@ -1,15 +1,13 @@
 import streamlit as st
 import sqlite3
 import re
+import json
+import base64
+import requests
 from datetime import datetime, date
 from PIL import Image, ImageEnhance
 import io
 import pandas as pd
-try:
-    import pytesseract
-    OCR_OK = True
-except Exception:
-    OCR_OK = False
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG
@@ -51,7 +49,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Pas d'API externe — OCR local avec Tesseract (100% gratuit)
+# ═══════════════════════════════════════════════════════════════
+#  MISTRAL SETUP
+# ═══════════════════════════════════════════════════════════════
+try:
+    MISTRAL_KEY = st.secrets["MISTRAL_API_KEY"]
+    MISTRAL_OK = True
+except Exception:
+    MISTRAL_KEY = None
+    MISTRAL_OK = False
 
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES
@@ -114,87 +120,77 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
-def optimiser_image(image_data):
-    """Optimise l'image pour une meilleure lecture OCR."""
+def image_en_base64(image_data):
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
     w, h = img.size
-    if w < 1200:
-        ratio = 1200 / w
+    if w < 1000:
+        ratio = 1000 / w
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Contrast(img).enhance(1.5)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
-    return img
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-def extraire_date(texte):
-    """Cherche une date dans le texte (DLC, DDM, etc.)"""
-    patterns = [
-        r'(?:DLC|DDM|BBD|avant le?|before)[^\d]*(\d{2})[./\-](\d{2})[./\-](\d{2,4})',
-        r'(\d{2})[./\-](\d{2})[./\-](\d{4})',
-        r'(\d{2})[./\-](\d{2})[./\-](\d{2})',
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, texte, re.IGNORECASE)
-        if m:
-            j, mo, a = m.group(1), m.group(2), m.group(3)
-            if len(a) == 2:
-                a = "20" + a
-            try:
-                datetime(int(a), int(mo), int(j))
-                return f"{a}-{mo}-{j}"
-            except Exception:
-                pass
-    return None
-
-def extraire_lot(texte):
-    """Cherche un numéro de lot dans le texte."""
-    patterns = [
-        r'(?:LOT|Lot|lot)\s*[n°#:\-]?\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
-        r'(?:L|l)\s*[:]\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
-        r'(?:Batch|BATCH)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, texte)
-        if m:
-            return m.group(1).strip()
-    return None
+def appeler_mistral(prompt, image_data):
+    if not MISTRAL_OK:
+        return {"erreur": "Cle Mistral non configuree"}
+    try:
+        img_b64 = image_en_base64(image_data)
+        payload = {
+            "model": "pixtral-12b-2409",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": f"data:image/jpeg;base64,{img_b64}"}
+                ]
+            }],
+            "max_tokens": 500
+        }
+        resp = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {MISTRAL_KEY}",
+                     "Content-Type": "application/json"},
+            json=payload,
+            timeout=30
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"erreur": str(e)}
 
 def lire_etiquette(image_data):
-    """Lecture OCR locale — 100% gratuit, aucune API."""
-    if not OCR_OK:
-        return {"erreur": "OCR non disponible"}
-    try:
-        img = optimiser_image(image_data)
-        texte = pytesseract.image_to_string(img, lang="fra+eng")
-        lignes = [l.strip() for l in texte.splitlines() if len(l.strip()) > 3]
-        nom = lignes[0] if lignes else None
-        return {
-            "_texte_brut": texte,
-            "nom_produit":  nom,
-            "marque":       None,
-            "numero_lot":   extraire_lot(texte),
-            "dlc":          extraire_date(texte),
-        }
-    except Exception as e:
-        return {"erreur": str(e)}
+    prompt = (
+        "Tu es un expert OCR en etiquettes alimentaires francaises. "
+        "Lis TOUT le texte de cette etiquette et reponds UNIQUEMENT en JSON valide: "
+        "{\"_texte_brut\": \"tout le texte mot pour mot\", "
+        "\"nom_produit\": \"nom du produit\", "
+        "\"marque\": \"marque ou fabricant\", "
+        "\"numero_lot\": \"numero de lot exact (cherche LOT, L:, Batch)\", "
+        "\"dlc\": \"date limite au format YYYY-MM-DD (cherche DLC, DDM, BBD)\"} "
+        "Si absent mets null."
+    )
+    return appeler_mistral(prompt, image_data)
 
 def lire_bl(image_data):
-    """Lecture OCR du BL."""
-    if not OCR_OK:
-        return {"erreur": "OCR non disponible"}
-    try:
-        img = optimiser_image(image_data)
-        texte = pytesseract.image_to_string(img, lang="fra+eng")
-        date_val = extraire_date(texte)
-        return {
-            "fournisseur": None,
-            "date": date_val,
-            "produits": [],
-            "_texte_brut": texte
-        }
-    except Exception as e:
-        return {"erreur": str(e)}
+    prompt = (
+        "Analyse ce bon de livraison alimentaire. "
+        "Reponds UNIQUEMENT en JSON valide: "
+        "{\"fournisseur\": \"nom de la societe\", "
+        "\"date\": \"date au format YYYY-MM-DD\", "
+        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
+        "Si absent mets null."
+    )
+    return appeler_mistral(prompt, image_data)
 
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS BASE DE DONNEES
@@ -579,11 +575,11 @@ def page_parametres():
                            f"preparations_{date.today()}.csv", "text/csv", use_container_width=True)
 
     st.divider()
-    st.subheader("🤖 OCR")
-    if OCR_OK:
-        st.success("Tesseract OCR actif — lecture automatique disponible")
+    st.subheader("🤖 IA Vision")
+    if MISTRAL_OK:
+        st.success("Mistral Pixtral connecte — lecture automatique active !")
     else:
-        st.warning("OCR en cours d'installation...")
+        st.error("Cle Mistral manquante — ajoute MISTRAL_API_KEY dans Secrets")
     st.caption("v1.2 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
