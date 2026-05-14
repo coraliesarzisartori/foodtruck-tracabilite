@@ -153,7 +153,7 @@ def lire_image(image_data, prompt):
 def lire_tout_texte(image_data):
     """Étape 1 : lit tout le texte brut de l'image."""
     if not GEMINI_OK:
-        return ""
+        return "", "Clé API non configurée"
     try:
         img = preparer_image(image_data)
         response = model.generate_content([
@@ -162,9 +162,9 @@ def lire_tout_texte(image_data):
             "N'interprète pas, ne résume pas, copie tout.",
             img
         ])
-        return response.text.strip()
-    except Exception:
-        return ""
+        return response.text.strip(), None
+    except Exception as e:
+        return "", str(e)
 
 def extraire_infos_depuis_texte(texte_brut):
     """Étape 2 : extrait les infos structurées depuis le texte brut."""
@@ -207,9 +207,9 @@ Si une info manque vraiment, mets null. Ne laisse pas de champ vide si l'info es
 def lire_etiquette(image_data):
     """Lecture en 2 étapes : d'abord tout le texte, puis extraction structurée."""
     # Étape 1 : lire tout le texte brut
-    texte_brut = lire_tout_texte(image_data)
+    texte_brut, erreur = lire_tout_texte(image_data)
     if not texte_brut:
-        return {"erreur": "Impossible de lire le texte"}
+        return {"erreur": erreur or "Impossible de lire le texte"}
 
     # Étape 2 : extraire les infos depuis le texte
     infos = extraire_infos_depuis_texte(texte_brut)
@@ -378,7 +378,9 @@ def page_reception():
                         with st.expander("👁️ Texte brut lu par l'IA"):
                             st.code(data["_texte_brut"])
                 else:
-                    st.warning("⚠️ Photo difficile à lire. Essaie : plus près, meilleure lumière, pas de reflet.")
+                    erreur_msg = data.get("erreur", "Inconnue") if data else "Aucune réponse"
+                    st.error(f"❌ Erreur : {erreur_msg}")
+                    st.info("💡 Complète les champs manuellement ci-dessous.")
 
         with st.form("form_produit"):
             nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
