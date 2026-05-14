@@ -50,14 +50,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  MISTRAL SETUP
+#  SETUP : Tesseract (OCR) + Groq (IA texte) — 100% gratuit
 # ═══════════════════════════════════════════════════════════════
 try:
-    MISTRAL_KEY = st.secrets["MISTRAL_API_KEY"]
-    MISTRAL_OK = True
+    import pytesseract
+    OCR_OK = True
 except Exception:
-    MISTRAL_KEY = None
-    MISTRAL_OK = False
+    OCR_OK = False
+
+try:
+    GROQ_KEY = st.secrets["GROQ_API_KEY"]
+    GROQ_OK = True
+except Exception:
+    GROQ_KEY = None
+    GROQ_OK = False
 
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES
@@ -120,50 +126,77 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
-def image_en_base64(image_data):
+def optimiser_image(image_data):
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
     w, h = img.size
-    if w < 1000:
-        ratio = 1000 / w
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(1.5)
+    if w < 1200:
+        ratio = 1200 / w
+        img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return img
 
-def appeler_mistral(prompt, image_data):
-    if not MISTRAL_OK:
-        return {"erreur": "Cle Mistral non configuree"}
+def ocr_texte(image_data):
+    """Étape 1 : Tesseract lit tout le texte brut."""
+    if not OCR_OK:
+        return ""
     try:
-        img_b64 = image_en_base64(image_data)
-        payload = {
-            "model": "pixtral-12b-2409",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url",
-                     "image_url": f"data:image/jpeg;base64,{img_b64}"}
-                ]
-            }],
-            "max_tokens": 500
-        }
-        import time
-        for tentative in range(3):
-            resp = requests.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {MISTRAL_KEY}",
-                         "Content-Type": "application/json"},
-                json=payload,
-                timeout=30
-            )
-            if resp.status_code == 429:
-                time.sleep(5)
-                continue
-            break
+        img = optimiser_image(image_data)
+        # Essai en niveaux de gris pour meilleure lecture
+        img_grey = img.convert('L')
+        texte = pytesseract.image_to_string(img_grey, lang="fra+eng",
+                                             config="--psm 6")
+        if len(texte.strip()) < 10:
+            texte = pytesseract.image_to_string(img, lang="fra+eng",
+                                                 config="--psm 11")
+        return texte.strip()
+    except Exception:
+        return ""
+
+def groq_extraire(texte_brut, type_doc="etiquette"):
+    """Étape 2 : Groq interprète le texte extrait."""
+    if not GROQ_OK or not texte_brut:
+        return {}
+    try:
+        if type_doc == "etiquette":
+            prompt = f"""Voici le texte brut lu sur une etiquette alimentaire :
+
+{texte_brut}
+
+Extrais ces infos et reponds UNIQUEMENT en JSON valide :
+{{
+  "nom_produit": "nom du produit",
+  "marque": "marque ou fabricant",
+  "numero_lot": "numero de lot (cherche LOT, L:, Lot n, Batch - prends tout ce qui suit)",
+  "dlc": "date limite format YYYY-MM-DD (cherche DLC, DDM, BBD, consommer avant - convertis JJ/MM/AA)"
+}}
+Si absent mets null. Le texte OCR peut avoir des fautes - interprete intelligemment."""
+        else:
+            prompt = f"""Voici le texte brut d un bon de livraison :
+
+{texte_brut}
+
+Reponds UNIQUEMENT en JSON valide :
+{{
+  "fournisseur": "nom de la societe fournisseur",
+  "date": "date au format YYYY-MM-DD"
+}}
+Si absent mets null."""
+
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+                "temperature": 0.1
+            },
+            timeout=15
+        )
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"].strip()
         if "```json" in text:
@@ -175,28 +208,21 @@ def appeler_mistral(prompt, image_data):
         return {"erreur": str(e)}
 
 def lire_etiquette(image_data):
-    prompt = (
-        "Tu es un expert OCR en etiquettes alimentaires francaises. "
-        "Lis TOUT le texte de cette etiquette et reponds UNIQUEMENT en JSON valide: "
-        "{\"_texte_brut\": \"tout le texte mot pour mot\", "
-        "\"nom_produit\": \"nom du produit\", "
-        "\"marque\": \"marque ou fabricant\", "
-        "\"numero_lot\": \"numero de lot exact (cherche LOT, L:, Batch)\", "
-        "\"dlc\": \"date limite au format YYYY-MM-DD (cherche DLC, DDM, BBD)\"} "
-        "Si absent mets null."
-    )
-    return appeler_mistral(prompt, image_data)
+    texte = ocr_texte(image_data)
+    if not texte:
+        return {"erreur": "Photo illisible — essaie plus pres avec bonne lumiere"}
+    result = groq_extraire(texte, "etiquette")
+    result["_texte_brut"] = texte
+    return result
 
 def lire_bl(image_data):
-    prompt = (
-        "Analyse ce bon de livraison alimentaire. "
-        "Reponds UNIQUEMENT en JSON valide: "
-        "{\"fournisseur\": \"nom de la societe\", "
-        "\"date\": \"date au format YYYY-MM-DD\", "
-        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
-        "Si absent mets null."
-    )
-    return appeler_mistral(prompt, image_data)
+    texte = ocr_texte(image_data)
+    if not texte:
+        return {"erreur": "Photo illisible"}
+    result = groq_extraire(texte, "bl")
+    result["_texte_brut"] = texte
+    result["produits"] = []
+    return result
 
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS BASE DE DONNEES
@@ -581,11 +607,18 @@ def page_parametres():
                            f"preparations_{date.today()}.csv", "text/csv", use_container_width=True)
 
     st.divider()
-    st.subheader("🤖 IA Vision")
-    if MISTRAL_OK:
-        st.success("Mistral Pixtral connecte — lecture automatique active !")
-    else:
-        st.error("Cle Mistral manquante — ajoute MISTRAL_API_KEY dans Secrets")
+    st.subheader("🤖 IA")
+    col1, col2 = st.columns(2)
+    with col1:
+        if OCR_OK:
+            st.success("✅ Tesseract OCR")
+        else:
+            st.warning("⏳ Tesseract en cours...")
+    with col2:
+        if GROQ_OK:
+            st.success("✅ Groq IA")
+        else:
+            st.error("❌ Cle Groq manquante")
     st.caption("v1.2 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
