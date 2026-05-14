@@ -62,17 +62,15 @@ try:
         if "generateContent" in m.supported_generation_methods
     ]
     MODELES_LISTES = [m.name for m in vision_ok]
-    # Priorite : flash > pro-vision > pro
+    # Priorite : modeles gratuits les plus capables
     MODELE = None
     for candidat in [
-        "models/gemini-1.5-flash-latest",
-        "models/gemini-1.5-flash",
-        "models/gemini-1.5-flash-002",
-        "models/gemini-1.5-flash-001",
-        "models/gemini-1.5-pro-latest",
-        "models/gemini-1.5-pro",
-        "models/gemini-pro-vision",
-        "models/gemini-1.0-pro-vision-001",
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-2.0-flash-lite-001",
+        "models/gemini-flash-lite-latest",
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash",
+        "models/gemini-flash-latest",
     ]:
         if candidat in MODELES_LISTES:
             MODELE = candidat
