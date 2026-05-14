@@ -525,29 +525,74 @@ def fetch_factures_gmail(jours=30):
                         "lien":             None,
                     })
 
-                # Email sans PJ mais avec "facture" dans sujet → facture via lien
+                # Email sans PJ mais avec "facture" dans sujet → tente de telecharger via lien
                 if not has_attachment and is_invoice:
-                    num_fac = _extraire_numero_facture(subject)
-                    liens   = _extraire_liens_body(msg)
-                    lien_fac = liens[0] if liens else None
-                    fname = f"FACTURE_{num_fac or 'lien'}.txt"
-                    info  = f"Facture: {subject}\nDe: {sender}\nDate: {date_str}\nLien: {lien_fac or 'non trouve'}"
-                    found.append({
-                        "filename":         fname,
-                        "content_b64":      base64.b64encode(info.encode()).decode("utf-8"),
-                        "sender":           sender,
-                        "subject":          subject,
-                        "date":             date_str,
-                        "is_fourn":         is_fourn,
-                        "is_invoice":       True,
-                        "ext":              "txt",
-                        "fourn_id":         fourn_id,
-                        "fourn_nom":        fourn_nom,
-                        "num_bl_email":     num_bl_email,
-                        "livraison_id_auto":livraison_id_auto,
-                        "lien":             lien_fac,
-                        "num_facture":      num_fac,
-                    })
+                    num_fac  = _extraire_numero_facture(subject)
+                    liens    = _extraire_liens_body(msg)
+                    lien_fac = None
+                    pdf_auto = None
+
+                    # Tente de telecharger le PDF depuis chaque lien
+                    for lien in liens[:5]:
+                        try:
+                            r = requests.get(lien, timeout=15, allow_redirects=True,
+                                             headers={"User-Agent": "Mozilla/5.0"})
+                            ct = r.headers.get("Content-Type", "")
+                            if r.status_code == 200 and ("pdf" in ct.lower() or lien.lower().endswith(".pdf")):
+                                pdf_auto = base64.b64encode(r.content).decode("utf-8")
+                                lien_fac = lien
+                                break
+                            elif r.status_code == 200 and len(r.content) > 5000:
+                                # Essaye quand meme si gros fichier binaire
+                                if r.content[:4] == b"%PDF":
+                                    pdf_auto = base64.b64encode(r.content).decode("utf-8")
+                                    lien_fac = lien
+                                    break
+                        except Exception:
+                            continue
+
+                    if pdf_auto:
+                        # PDF telecharge automatiquement !
+                        fname = f"FACTURE_{num_fac or 'auto'}.pdf"
+                        found.append({
+                            "filename":         fname,
+                            "content_b64":      pdf_auto,
+                            "sender":           sender,
+                            "subject":          subject,
+                            "date":             date_str,
+                            "is_fourn":         is_fourn,
+                            "is_invoice":       True,
+                            "ext":              "pdf",
+                            "fourn_id":         fourn_id,
+                            "fourn_nom":        fourn_nom,
+                            "num_bl_email":     num_bl_email,
+                            "livraison_id_auto":livraison_id_auto,
+                            "lien":             lien_fac,
+                            "num_facture":      num_fac,
+                            "auto_downloaded":  True,
+                        })
+                    else:
+                        # Lien necessite connexion — on garde la reference
+                        lien_fac = liens[0] if liens else None
+                        fname = f"FACTURE_{num_fac or 'lien'}.txt"
+                        info  = f"Facture: {subject}\nDe: {sender}\nDate: {date_str}\nLien: {lien_fac or 'non trouve'}"
+                        found.append({
+                            "filename":         fname,
+                            "content_b64":      base64.b64encode(info.encode()).decode("utf-8"),
+                            "sender":           sender,
+                            "subject":          subject,
+                            "date":             date_str,
+                            "is_fourn":         is_fourn,
+                            "is_invoice":       True,
+                            "ext":              "txt",
+                            "fourn_id":         fourn_id,
+                            "fourn_nom":        fourn_nom,
+                            "num_bl_email":     num_bl_email,
+                            "livraison_id_auto":livraison_id_auto,
+                            "lien":             lien_fac,
+                            "num_facture":      num_fac,
+                            "auto_downloaded":  False,
+                        })
             except Exception:
                 continue
 
@@ -1048,7 +1093,9 @@ def page_factures():
 
     for i, f in enumerate(filtered):
         # Badge selon detection
-        if f.get("lien") and f.get("ext") == "txt":
+        if f.get("auto_downloaded"):
+            tag = "⚡ PDF telecharge auto"
+        elif f.get("lien") and f.get("ext") == "txt":
             tag = "🔗 Facture via lien"
         elif f.get("fourn_nom"):
             tag = f"✅ {f['fourn_nom']}"
