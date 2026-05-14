@@ -1,12 +1,15 @@
 import streamlit as st
 import sqlite3
-import json
-import base64
-import requests
+import re
 from datetime import datetime, date
 from PIL import Image, ImageEnhance
 import io
 import pandas as pd
+try:
+    import pytesseract
+    OCR_OK = True
+except Exception:
+    OCR_OK = False
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG
@@ -48,41 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════
-#  GEMINI SETUP
-# ═══════════════════════════════════════════════════════════════
-try:
-    import google.generativeai as genai
-    GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=GEMINI_KEY)
-    # Lister uniquement les modeles qui supportent generateContent ET les images
-    tous = list(genai.list_models())
-    vision_ok = [
-        m for m in tous
-        if "generateContent" in m.supported_generation_methods
-    ]
-    MODELES_LISTES = [m.name for m in vision_ok]
-    # Priorite : modeles gratuits les plus capables
-    MODELE = None
-    for candidat in [
-        "models/gemini-2.0-flash-lite",
-        "models/gemini-2.0-flash-lite-001",
-        "models/gemini-flash-lite-latest",
-        "models/gemini-2.5-flash",
-        "models/gemini-2.0-flash",
-        "models/gemini-flash-latest",
-    ]:
-        if candidat in MODELES_LISTES:
-            MODELE = candidat
-            break
-    if not MODELE and MODELES_LISTES:
-        MODELE = MODELES_LISTES[0]
-    model_gemini = genai.GenerativeModel(MODELE)
-    GEMINI_OK = True
-except Exception as e:
-    GEMINI_KEY = None
-    GEMINI_OK = False
-    MODELE = "non configure"
+# Pas d'API externe — OCR local avec Tesseract (100% gratuit)
 
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES
@@ -145,57 +114,87 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
-def image_optimisee(image_data):
-    """Optimise une image PIL pour l'envoi à Gemini."""
+def optimiser_image(image_data):
+    """Optimise l'image pour une meilleure lecture OCR."""
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
     w, h = img.size
-    if w < 1000:
-        ratio = 1000 / w
+    if w < 1200:
+        ratio = 1200 / w
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(1.5)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
     return img
 
-def appeler_gemini(prompt, image_data):
-    """Appel Gemini via la librairie officielle."""
-    if not GEMINI_OK:
-        return {"erreur": "Cle API non configuree"}
+def extraire_date(texte):
+    """Cherche une date dans le texte (DLC, DDM, etc.)"""
+    patterns = [
+        r'(?:DLC|DDM|BBD|avant le?|before)[^\d]*(\d{2})[./\-](\d{2})[./\-](\d{2,4})',
+        r'(\d{2})[./\-](\d{2})[./\-](\d{4})',
+        r'(\d{2})[./\-](\d{2})[./\-](\d{2})',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, texte, re.IGNORECASE)
+        if m:
+            j, mo, a = m.group(1), m.group(2), m.group(3)
+            if len(a) == 2:
+                a = "20" + a
+            try:
+                datetime(int(a), int(mo), int(j))
+                return f"{a}-{mo}-{j}"
+            except Exception:
+                pass
+    return None
+
+def extraire_lot(texte):
+    """Cherche un numéro de lot dans le texte."""
+    patterns = [
+        r'(?:LOT|Lot|lot)\s*[n°#:\-]?\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
+        r'(?:L|l)\s*[:]\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
+        r'(?:Batch|BATCH)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-\.]{2,15})',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, texte)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def lire_etiquette(image_data):
+    """Lecture OCR locale — 100% gratuit, aucune API."""
+    if not OCR_OK:
+        return {"erreur": "OCR non disponible"}
     try:
-        img = image_optimisee(image_data)
-        response = model_gemini.generate_content([prompt, img])
-        text = response.text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        return json.loads(text)
+        img = optimiser_image(image_data)
+        texte = pytesseract.image_to_string(img, lang="fra+eng")
+        lignes = [l.strip() for l in texte.splitlines() if len(l.strip()) > 3]
+        nom = lignes[0] if lignes else None
+        return {
+            "_texte_brut": texte,
+            "nom_produit":  nom,
+            "marque":       None,
+            "numero_lot":   extraire_lot(texte),
+            "dlc":          extraire_date(texte),
+        }
     except Exception as e:
         return {"erreur": str(e)}
 
 def lire_bl(image_data):
-    prompt = (
-        "Analyse ce bon de livraison alimentaire. "
-        "Reponds UNIQUEMENT en JSON valide: "
-        "{\"fournisseur\": \"nom societe\", \"date\": \"YYYY-MM-DD\", "
-        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
-        "Si une info manque mets null."
-    )
-    return appeler_gemini(prompt, image_data)
-
-def lire_etiquette(image_data):
-    prompt = (
-        "Lis TOUT le texte de cette etiquette alimentaire. "
-        "Reponds UNIQUEMENT en JSON valide: "
-        "{\"_texte_brut\": \"tout le texte mot pour mot\", "
-        "\"nom_produit\": \"nom du produit\", "
-        "\"marque\": \"marque\", "
-        "\"numero_lot\": \"numero de lot (cherche LOT L: Batch)\", "
-        "\"dlc\": \"date limite YYYY-MM-DD (cherche DLC DDM BBD)\"} "
-        "Si absent mets null."
-    )
-    return appeler_gemini(prompt, image_data)
+    """Lecture OCR du BL."""
+    if not OCR_OK:
+        return {"erreur": "OCR non disponible"}
+    try:
+        img = optimiser_image(image_data)
+        texte = pytesseract.image_to_string(img, lang="fra+eng")
+        date_val = extraire_date(texte)
+        return {
+            "fournisseur": None,
+            "date": date_val,
+            "produits": [],
+            "_texte_brut": texte
+        }
+    except Exception as e:
+        return {"erreur": str(e)}
 
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS BASE DE DONNEES
@@ -580,14 +579,11 @@ def page_parametres():
                            f"preparations_{date.today()}.csv", "text/csv", use_container_width=True)
 
     st.divider()
-    st.subheader("🤖 IA")
-    if GEMINI_OK:
-        st.success(f"Modele actif : {MODELE}")
-        with st.expander("Tous les modeles disponibles pour ta cle"):
-            for m in MODELES_LISTES:
-                st.write(f"• {m}")
+    st.subheader("🤖 OCR")
+    if OCR_OK:
+        st.success("Tesseract OCR actif — lecture automatique disponible")
     else:
-        st.error("IA non connectee — verifie la cle API dans Secrets")
+        st.warning("OCR en cours d'installation...")
     st.caption("v1.2 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
