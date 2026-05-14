@@ -49,15 +49,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI SETUP — via API REST directe (pas de librairie)
+#  GEMINI SETUP
 # ═══════════════════════════════════════════════════════════════
 try:
+    import google.generativeai as genai
     GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
-    GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    genai.configure(api_key=GEMINI_KEY)
+    # On liste les modeles disponibles pour choisir le bon
+    modeles_dispo = [m.name for m in genai.list_models()]
+    # Choisir le meilleur modele disponible
+    MODELE = "models/gemini-1.5-flash"
+    for candidat in ["models/gemini-1.5-flash", "models/gemini-pro-vision",
+                     "models/gemini-1.0-pro-vision", "models/gemini-pro"]:
+        if candidat in modeles_dispo:
+            MODELE = candidat
+            break
+    model_gemini = genai.GenerativeModel(MODELE)
     GEMINI_OK = True
-except Exception:
+except Exception as e:
     GEMINI_KEY = None
     GEMINI_OK = False
+    MODELE = "non configure"
 
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES
@@ -120,8 +132,8 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
-def image_en_base64(image_data):
-    """Convertit et optimise une image en base64 pour l'API Gemini."""
+def image_optimisee(image_data):
+    """Optimise une image PIL pour l'envoi à Gemini."""
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -131,28 +143,16 @@ def image_en_base64(image_data):
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(1.5)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    return img
 
 def appeler_gemini(prompt, image_data):
-    """Appel direct API REST Gemini — sans librairie tierce."""
+    """Appel Gemini via la librairie officielle."""
     if not GEMINI_OK:
         return {"erreur": "Cle API non configuree"}
     try:
-        img_b64 = image_en_base64(image_data)
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-                ]
-            }]
-        }
-        headers = {"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"}
-        resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        img = image_optimisee(image_data)
+        response = model_gemini.generate_content([prompt, img])
+        text = response.text.strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:
@@ -567,7 +567,12 @@ def page_parametres():
                            f"preparations_{date.today()}.csv", "text/csv", use_container_width=True)
 
     st.divider()
-    st.caption("v1.1 — FoodTruck Tracabilite HACCP")
+    st.subheader("🤖 IA")
+    if GEMINI_OK:
+        st.success(f"Modele actif : {MODELE}")
+    else:
+        st.error("IA non connectee — verifie la cle API dans Secrets")
+    st.caption("v1.2 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
 #  NAVIGATION
