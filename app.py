@@ -53,7 +53,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 try:
     GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
-    GEMINI_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
+    GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     GEMINI_OK = True
 except Exception:
     GEMINI_KEY = None
@@ -149,7 +149,8 @@ def appeler_gemini(prompt, image_data):
                 ]
             }]
         }
-        resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+        headers = {"x-goog-api-key": GEMINI_KEY, "Content-Type": "application/json"}
+        resp = requests.post(GEMINI_URL, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         if "```json" in text:
