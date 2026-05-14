@@ -53,7 +53,7 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     GEMINI_OK = True
 except Exception:
     GEMINI_OK = False
@@ -119,25 +119,28 @@ init_db()
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
+def preparer_image(image_data):
+    """Optimise l'image pour la lecture OCR."""
+    from PIL import ImageEnhance, ImageFilter
+    img = Image.open(io.BytesIO(image_data))
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    # Agrandir si nécessaire
+    w, h = img.size
+    if w < 1000:
+        ratio = 1000 / w
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    # Améliorer le contraste et la netteté
+    img = ImageEnhance.Contrast(img).enhance(1.5)
+    img = ImageEnhance.Sharpness(img).enhance(2.0)
+    return img
+
 def lire_image(image_data, prompt):
     if not GEMINI_OK:
         return None
     try:
-        # Améliorer la qualité de l'image pour la lecture
-        img = Image.open(io.BytesIO(image_data))
-        # Convertir en RGB si nécessaire
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        # Redimensionner si trop petite (améliore la lecture OCR)
-        w, h = img.size
-        if w < 800:
-            ratio = 800 / w
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-
-        response = model.generate_content(
-            [prompt, img],
-            generation_config={"temperature": 0.1}  # Plus précis, moins créatif
-        )
+        img = preparer_image(image_data)
+        response = model.generate_content([prompt, img])
         text = response.text.strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -146,6 +149,48 @@ def lire_image(image_data, prompt):
         return json.loads(text)
     except Exception as e:
         return {"erreur": str(e)}
+
+def lire_tout_texte(image_data):
+    """Étape 1 : lit tout le texte brut de l'image."""
+    if not GEMINI_OK:
+        return ""
+    try:
+        img = preparer_image(image_data)
+        response = model.generate_content([
+            "Lis et retranscris TOUT le texte visible sur cette étiquette alimentaire, "
+            "exactement comme tu le vois, mot pour mot, chiffre pour chiffre. "
+            "N'interprète pas, ne résume pas, copie tout.",
+            img
+        ])
+        return response.text.strip()
+    except Exception:
+        return ""
+
+def extraire_infos_depuis_texte(texte_brut):
+    """Étape 2 : extrait les infos structurées depuis le texte brut."""
+    if not texte_brut:
+        return {}
+    try:
+        response = model.generate_content(f"""Voici le texte d'une étiquette alimentaire :
+
+{texte_brut}
+
+Extrais ces informations et réponds UNIQUEMENT en JSON valide :
+{{
+  "nom_produit": "nom du produit",
+  "marque": "marque ou fabricant",
+  "numero_lot": "numéro de lot (cherche LOT, L, Lot n°, Batch - prends tous les chiffres/lettres qui suivent)",
+  "dlc": "date limite au format YYYY-MM-DD (cherche DLC, DDM, À consommer avant, BBD - convertis JJ/MM/AA ou JJ/MM/AAAA)"
+}}
+Si une info est absente du texte, mets null.""")
+        text = response.text.strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except Exception:
+        return {}
 
 def lire_bl(image_data):
     prompt = """Tu es un expert en lecture de documents alimentaires.
@@ -160,23 +205,18 @@ Si une info manque vraiment, mets null. Ne laisse pas de champ vide si l'info es
     return lire_image(image_data, prompt)
 
 def lire_etiquette(image_data):
-    prompt = """Tu es un expert en lecture d'étiquettes alimentaires françaises.
-Analyse TRÈS attentivement cette étiquette et trouve TOUTES les informations suivantes.
+    """Lecture en 2 étapes : d'abord tout le texte, puis extraction structurée."""
+    # Étape 1 : lire tout le texte brut
+    texte_brut = lire_tout_texte(image_data)
+    if not texte_brut:
+        return {"erreur": "Impossible de lire le texte"}
 
-CHERCHE ABSOLUMENT :
-- Le numéro de lot : souvent écrit LOT, N°LOT, Lot n°, L:, Lot:, LOTE, Batch, numéro commençant par L
-- La DLC/DDM : souvent écrit DLC, DDM, À consommer avant le, À consommer de préférence avant, BBD, Use by, Best before, date imprimée en relief ou tampon
+    # Étape 2 : extraire les infos depuis le texte
+    infos = extraire_infos_depuis_texte(texte_brut)
 
-Réponds UNIQUEMENT en JSON valide, sans texte avant ou après :
-{
-  "nom_produit": "nom complet et précis du produit",
-  "marque": "marque ou fabricant si visible",
-  "numero_lot": "numéro de lot COMPLET tel qu'écrit (ex: L240051, LOT 2024-05, etc.)",
-  "dlc": "date limite au format YYYY-MM-DD - convertis si format JJ/MM/AAAA ou JJ.MM.AAAA"
-}
-
-IMPORTANT : Si tu vois des chiffres qui ressemblent à une date ou un numéro de lot, inclus-les même si le contexte n'est pas totalement clair. Mets null uniquement si vraiment invisible."""
-    return lire_image(image_data, prompt)
+    # Garder le texte brut pour affichage debug si besoin
+    infos["_texte_brut"] = texte_brut
+    return infos
 
 # ═══════════════════════════════════════════════════════════════
 #  FONCTIONS BASE DE DONNÉES
@@ -326,17 +366,19 @@ def page_reception():
                 if data and "erreur" not in data:
                     st.session_state.etiq_data = data
                     etiq = data
-                    # Compter ce qui a été trouvé
-                    trouves = [k for k, v in data.items() if v and v != "null"]
-                    manquants = [k for k, v in data.items() if not v or v == "null"]
+                    champs = ["nom_produit", "marque", "numero_lot", "dlc"]
+                    trouves   = [k for k in champs if data.get(k) and data[k] != "null"]
+                    manquants = [k for k in champs if not data.get(k) or data[k] == "null"]
                     if len(trouves) >= 2:
-                        st.success(f"✅ Lu : {', '.join(trouves)}")
+                        st.success(f"✅ Trouvé : {', '.join(trouves)}")
                     else:
-                        st.warning("⚠️ Lecture partielle — complète les champs manquants ci-dessous.")
-                    if manquants:
-                        st.info(f"💡 Non trouvé : {', '.join(manquants)} — saisis-les manuellement.")
+                        st.warning("⚠️ Lecture partielle — complète les champs ci-dessous.")
+                    # Afficher le texte brut lu pour vérification
+                    if data.get("_texte_brut"):
+                        with st.expander("👁️ Texte brut lu par l'IA"):
+                            st.code(data["_texte_brut"])
                 else:
-                    st.warning("⚠️ Lecture difficile — essaie de reprendre la photo plus près et bien éclairée, puis complète manuellement.")
+                    st.warning("⚠️ Photo difficile à lire. Essaie : plus près, meilleure lumière, pas de reflet.")
 
         with st.form("form_produit"):
             nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
