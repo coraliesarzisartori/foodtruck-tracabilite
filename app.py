@@ -627,7 +627,11 @@ def page_reception():
                 st.markdown("**📝 Informations livraison**")
                 fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
                 numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
-                date_rec   = st.date_input("Date de reception", value=date.today())
+                date_rec_default = date.today()
+                if bl_data.get("date"):
+                    try: date_rec_default = datetime.strptime(bl_data["date"], "%Y-%m-%d").date()
+                    except: pass
+                date_rec   = st.date_input("Date de reception", value=date_rec_default)
                 if st.form_submit_button("✅ Valider → Etape suivante"):
                     fourn_id = ids[noms.index(fourn_sel)]
                     db = conn()
