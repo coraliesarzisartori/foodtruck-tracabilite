@@ -414,12 +414,16 @@ def fetch_factures_gmail(jours=30):
         mail.login(EMAIL_ADDR, EMAIL_PASS)
 
         # Cherche dans "Tous les messages" pour trouver aussi les emails classes dans des dossiers
+        # Les noms avec espaces doivent etre entre guillemets pour IMAP
         dossier_ok = False
-        for dossier in ["[Gmail]/All Mail", "[Gmail]/Tous les messages", "INBOX"]:
-            status, _ = mail.select(dossier, readonly=True)
-            if status == "OK":
-                dossier_ok = True
-                break
+        for dossier in ['"[Gmail]/All Mail"', '"[Gmail]/Tous les messages"', 'INBOX']:
+            try:
+                status, _ = mail.select(dossier, readonly=True)
+                if status == "OK":
+                    dossier_ok = True
+                    break
+            except Exception:
+                continue
         if not dossier_ok:
             mail.logout()
             return {"erreur": "Impossible d'acceder aux emails Gmail"}
