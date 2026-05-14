@@ -132,18 +132,21 @@ def init_db():
             pass
 
     # Migration donnees : rattache les produits orphelins a leur livraison la plus proche
-    db.execute("""
-        UPDATE produits
-        SET livraison_id = (
-            SELECT l.id FROM livraisons l
-            WHERE l.fournisseur_id = produits.fournisseur_id
-            ORDER BY ABS(julianday(l.date_reception) - julianday(produits.created_at))
-            LIMIT 1
-        )
-        WHERE livraison_id IS NULL
-          AND fournisseur_id IS NOT NULL
-    """)
-    db.commit()
+    try:
+        db.execute("""
+            UPDATE produits
+            SET livraison_id = (
+                SELECT l.id FROM livraisons l
+                WHERE l.fournisseur_id = produits.fournisseur_id
+                ORDER BY ABS(julianday(l.date_reception) - julianday(produits.created_at))
+                LIMIT 1
+            )
+            WHERE livraison_id IS NULL
+              AND fournisseur_id IS NOT NULL
+        """)
+        db.commit()
+    except Exception:
+        pass
     db.close()
 
 init_db()
