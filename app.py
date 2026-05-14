@@ -3,10 +3,13 @@ import sqlite3
 import json
 import base64
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from PIL import Image, ImageEnhance
 import io
 import pandas as pd
+import imaplib
+import email as email_lib
+from email.header import decode_header as decode_hdr
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIG
@@ -99,14 +102,28 @@ def init_db():
             FOREIGN KEY (preparation_id) REFERENCES preparations(id),
             FOREIGN KEY (produit_id)     REFERENCES produits(id)
         );
+        CREATE TABLE IF NOT EXISTS factures (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            livraison_id INTEGER,
+            nom_fichier  TEXT,
+            contenu_b64  TEXT,
+            expediteur   TEXT,
+            sujet        TEXT,
+            date_email   TEXT,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (livraison_id) REFERENCES livraisons(id)
+        );
     """)
     db.commit()
-    # Migration : ajoute numero_bl si la colonne n'existe pas encore
-    try:
-        db.execute("ALTER TABLE livraisons ADD COLUMN numero_bl TEXT")
-        db.commit()
-    except Exception:
-        pass
+    # Migrations
+    for migration in [
+        "ALTER TABLE livraisons ADD COLUMN numero_bl TEXT",
+    ]:
+        try:
+            db.execute(migration)
+            db.commit()
+        except Exception:
+            pass
     db.close()
 
 init_db()
@@ -245,6 +262,145 @@ def rechercher_lot(numero_lot):
     """, (f"%{numero_lot}%",)).fetchall()
     db.close()
     return rows
+
+def get_livraisons():
+    db = conn()
+    rows = db.execute("""
+        SELECT l.id, l.numero_bl, l.date_reception, f.nom AS nom_fourn
+        FROM livraisons l
+        JOIN fournisseurs f ON l.fournisseur_id = f.id
+        ORDER BY l.date_reception DESC
+    """).fetchall()
+    db.close()
+    return rows
+
+def sauvegarder_facture(livraison_id, nom_fichier, contenu_b64, expediteur, sujet, date_email):
+    db = conn()
+    db.execute("""
+        INSERT INTO factures (livraison_id, nom_fichier, contenu_b64, expediteur, sujet, date_email)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (livraison_id, nom_fichier, contenu_b64, expediteur, sujet, date_email))
+    db.commit()
+    db.close()
+
+def get_factures(livraison_id=None):
+    db = conn()
+    if livraison_id:
+        rows = db.execute("""
+            SELECT f.*, l.numero_bl, four.nom AS nom_fourn
+            FROM factures f
+            LEFT JOIN livraisons l ON f.livraison_id = l.id
+            LEFT JOIN fournisseurs four ON l.fournisseur_id = four.id
+            WHERE f.livraison_id = ?
+            ORDER BY f.created_at DESC
+        """, (livraison_id,)).fetchall()
+    else:
+        rows = db.execute("""
+            SELECT f.*, l.numero_bl, four.nom AS nom_fourn
+            FROM factures f
+            LEFT JOIN livraisons l ON f.livraison_id = l.id
+            LEFT JOIN fournisseurs four ON l.fournisseur_id = four.id
+            ORDER BY f.created_at DESC
+        """).fetchall()
+    db.close()
+    return rows
+
+def supprimer_facture(facture_id):
+    db = conn()
+    db.execute("DELETE FROM factures WHERE id = ?", (facture_id,))
+    db.commit()
+    db.close()
+
+# ═══════════════════════════════════════════════════════════════
+#  GMAIL — recuperation factures
+# ═══════════════════════════════════════════════════════════════
+def _decode_str(s):
+    if not s:
+        return ""
+    parts = decode_hdr(s)
+    result = ""
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            result += part.decode(enc or "utf-8", errors="ignore")
+        else:
+            result += str(part)
+    return result
+
+def fetch_factures_gmail(jours=30):
+    try:
+        EMAIL_ADDR = st.secrets["EMAIL_ADDRESS"]
+        EMAIL_PASS = st.secrets["EMAIL_APP_PASSWORD"]
+    except Exception:
+        return {"erreur": "Email non configure — ajoute EMAIL_ADDRESS et EMAIL_APP_PASSWORD dans Secrets"}
+
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(EMAIL_ADDR, EMAIL_PASS)
+        mail.select("INBOX")
+
+        since = (datetime.now() - timedelta(days=jours)).strftime("%d-%b-%Y")
+        status, data = mail.search(None, f'SINCE {since}')
+        if status != "OK" or not data[0]:
+            mail.logout()
+            return []
+
+        ids = data[0].split()
+        fournisseurs_noms = [f["nom"].lower() for f in get_fournisseurs()]
+        keywords_invoice = ["facture", "invoice", "bon de livraison", "bl ", "commande", "livraison", "avoir"]
+        found = []
+
+        for eid in ids[-150:]:
+            try:
+                status, msg_data = mail.fetch(eid, "(RFC822)")
+                if status != "OK":
+                    continue
+                raw = msg_data[0][1]
+                msg = email_lib.message_from_bytes(raw)
+
+                subject  = _decode_str(msg.get("Subject", ""))
+                sender   = _decode_str(msg.get("From", ""))
+                date_str = msg.get("Date", "")
+
+                text_low = (subject + " " + sender).lower()
+                is_fourn   = any(f in text_low for f in fournisseurs_noms)
+                is_invoice = any(k in text_low for k in keywords_invoice)
+
+                for part in msg.walk():
+                    if part.get_content_maintype() == "multipart":
+                        continue
+                    disp = part.get("Content-Disposition", "")
+                    if not disp:
+                        continue
+                    filename = _decode_str(part.get_filename() or "")
+                    if not filename:
+                        continue
+                    ext = filename.lower().split(".")[-1]
+                    if ext not in ("pdf", "jpg", "jpeg", "png"):
+                        continue
+                    content = part.get_payload(decode=True)
+                    if not content:
+                        continue
+                    found.append({
+                        "filename":    filename,
+                        "content_b64": base64.b64encode(content).decode("utf-8"),
+                        "sender":      sender,
+                        "subject":     subject,
+                        "date":        date_str,
+                        "is_fourn":    is_fourn,
+                        "is_invoice":  is_invoice,
+                        "ext":         ext,
+                    })
+            except Exception:
+                continue
+
+        mail.close()
+        mail.logout()
+        return found
+
+    except imaplib.IMAP4.error as e:
+        return {"erreur": f"Connexion Gmail echouee : {e}"}
+    except Exception as e:
+        return {"erreur": str(e)}
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE : RECEPTION
@@ -469,6 +625,107 @@ def page_tracabilite():
             </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
+#  PAGE : FACTURES
+# ═══════════════════════════════════════════════════════════════
+def page_factures():
+    st.header("📧 Factures")
+
+    EMAIL_OK = ("EMAIL_ADDRESS" in st.secrets and "EMAIL_APP_PASSWORD" in st.secrets)
+
+    if not EMAIL_OK:
+        st.warning("⚙️ Email non configure")
+        st.info("Va dans l'onglet **Config** → section Email pour voir les instructions.")
+        return
+
+    # ── Factures deja enregistrees ──────────────────────────────
+    factures = get_factures()
+    if factures:
+        st.subheader(f"📎 {len(factures)} facture(s) enregistree(s)")
+        for f in factures:
+            bl_label = f"BL #{f['livraison_id']} — {f['nom_fourn'] or '?'}" if f['livraison_id'] else "Non liee"
+            with st.expander(f"📄 {f['nom_fichier']}  •  {bl_label}"):
+                st.caption(f"De : {f['expediteur']}")
+                st.caption(f"Sujet : {f['sujet']}")
+                st.caption(f"Date email : {f['date_email']}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    mime = "application/pdf" if f['nom_fichier'].endswith(".pdf") else "image/jpeg"
+                    st.download_button(
+                        "📥 Telecharger",
+                        base64.b64decode(f['contenu_b64']),
+                        f['nom_fichier'], mime,
+                        key=f"dl_{f['id']}",
+                        use_container_width=True
+                    )
+                with col2:
+                    if st.button("🗑️ Supprimer", key=f"del_{f['id']}", use_container_width=True):
+                        supprimer_facture(f['id'])
+                        st.rerun()
+        st.divider()
+
+    # ── Synchronisation Gmail ────────────────────────────────────
+    st.subheader("🔄 Synchroniser depuis Gmail")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        jours = st.slider("Chercher dans les derniers X jours", 7, 90, 30, key="fac_jours")
+    with col2:
+        sync = st.button("🔄 Lancer", use_container_width=True, key="btn_sync")
+
+    if sync:
+        with st.spinner("Connexion a Gmail en cours..."):
+            result = fetch_factures_gmail(jours)
+        if isinstance(result, dict) and "erreur" in result:
+            st.error(f"❌ {result['erreur']}")
+            return
+        st.session_state.factures_found = result
+        st.session_state.factures_jours = jours
+
+    found = st.session_state.get("factures_found", [])
+    if not found:
+        if sync:
+            st.info("Aucun fichier (PDF/image) trouve dans les emails de cette periode.")
+        return
+
+    # Filtres
+    col_a, col_b = st.columns(2)
+    with col_a:
+        show_all = st.checkbox("Tout afficher (pas seulement fournisseurs)", value=False)
+    with col_b:
+        st.caption(f"{len(found)} fichier(s) au total")
+
+    filtered = found if show_all else [x for x in found if x["is_fourn"] or x["is_invoice"]]
+    if not filtered:
+        st.info("Aucune facture detectee. Coche 'Tout afficher' pour voir tous les fichiers.")
+        return
+
+    st.write(f"**{len(filtered)} fichier(s) detecte(s) comme factures/BL**")
+
+    # Liste des livraisons pour le lien
+    livraisons = get_livraisons()
+    lv_labels = ["-- Ne pas lier --"]
+    lv_ids    = [None]
+    for l in livraisons:
+        bl = f" (BL {l['numero_bl']})" if l['numero_bl'] else ""
+        lv_labels.append(f"{l['nom_fourn']} — {l['date_reception']}{bl}")
+        lv_ids.append(l['id'])
+
+    for i, f in enumerate(filtered):
+        tag = "✅ Fournisseur" if f["is_fourn"] else ("📄 Facture?" if f["is_invoice"] else "📎 Fichier")
+        with st.expander(f"{tag}  •  {f['filename']}"):
+            st.caption(f"De : {f['sender']}")
+            st.caption(f"Sujet : {f['subject']}")
+            st.caption(f"Date : {f['date']}")
+
+            lien_sel = st.selectbox("Lier a un BL", lv_labels, key=f"lv_{i}")
+            if st.button("💾 Enregistrer cette facture", key=f"save_{i}", use_container_width=True):
+                lid = lv_ids[lv_labels.index(lien_sel)]
+                sauvegarder_facture(lid, f['filename'], f['content_b64'], f['sender'], f['subject'], f['date'])
+                st.success(f"✅ '{f['filename']}' enregistree !")
+                # Retirer de la liste locale
+                st.session_state.factures_found = [x for j, x in enumerate(found) if x != f]
+                st.rerun()
+
+# ═══════════════════════════════════════════════════════════════
 #  PAGE : CONFIG
 # ═══════════════════════════════════════════════════════════════
 def page_config():
@@ -493,6 +750,31 @@ def page_config():
         st.success("✅ GPT-4o-mini connecte — lecture automatique active !")
     else:
         st.error("❌ Cle OpenAI manquante — ajoute OPENAI_API_KEY dans Secrets")
+
+    st.divider()
+    st.subheader("📧 Email (Factures Gmail)")
+    EMAIL_OK = ("EMAIL_ADDRESS" in st.secrets and "EMAIL_APP_PASSWORD" in st.secrets)
+    if EMAIL_OK:
+        st.success("✅ Gmail connecte — synchronisation des factures active !")
+    else:
+        st.warning("❌ Email non configure")
+        st.markdown("""
+**Pour connecter ton Gmail, 2 etapes :**
+
+**1. Active la validation en 2 etapes** (si pas deja fait)
+→ [myaccount.google.com](https://myaccount.google.com) → Securite → Validation en 2 etapes
+
+**2. Cree un mot de passe d'application**
+→ [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
+→ Nom : "FoodTruck" → Generer
+→ Copie le code a **16 caracteres**
+
+**3. Dans Streamlit Secrets, ajoute ces 2 lignes :**
+```
+EMAIL_ADDRESS = "ton.adresse@gmail.com"
+EMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"
+```
+        """)
 
     st.divider()
     st.subheader("💾 Sauvegarde")
@@ -525,11 +807,12 @@ def page_config():
 #  NAVIGATION
 # ═══════════════════════════════════════════════════════════════
 def main():
-    t1, t2, t3, t4 = st.tabs(["📦 Reception", "👨‍🍳 Prepa", "🔍 Traca", "⚙️ Config"])
+    t1, t2, t3, t4, t5 = st.tabs(["📦 Reception", "👨‍🍳 Prepa", "🔍 Traca", "📧 Factures", "⚙️ Config"])
     with t1: page_reception()
     with t2: page_preparation()
     with t3: page_tracabilite()
-    with t4: page_config()
+    with t4: page_factures()
+    with t5: page_config()
 
 if __name__ == "__main__":
     main()
