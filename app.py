@@ -326,6 +326,50 @@ def _decode_str(s):
             result += str(part)
     return result
 
+import re as _re
+
+def _extraire_numero_bl(texte):
+    """Extrait un numero de BL potentiel depuis un texte (sujet email)."""
+    patterns = [
+        r'(?:N°\s*BL|BL\s*N°|BL\s*#|BL[-_\s])([A-Z0-9][-A-Z0-9]{2,15})',
+        r'(?:bon\s*(?:de\s*)?livraison\s*(?:N°|#|:)?\s*)([A-Z0-9][-A-Z0-9]{2,15})',
+        r'(?:ref(?:erence)?[:\s]+)([A-Z0-9][-A-Z0-9]{3,15})',
+    ]
+    for pat in patterns:
+        m = _re.search(pat, texte, _re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def _trouver_fourn(text_low, fournisseurs):
+    """Retourne (id, nom) du fournisseur detecte, ou (None, None)."""
+    for f in fournisseurs:
+        mots = [m for m in f["nom"].lower().split() if len(m) > 3]
+        if any(m in text_low for m in mots):
+            return f["id"], f["nom"]
+    return None, None
+
+def _trouver_livraison(numero_bl_email, fournisseur_id, livraisons):
+    """Retourne l'id de livraison correspondant au BL detecte."""
+    if numero_bl_email:
+        for l in livraisons:
+            if l["numero_bl"] and numero_bl_email.lower() in l["numero_bl"].lower():
+                return l["id"]
+    if fournisseur_id:
+        for l in livraisons:
+            # Prend la livraison la plus recente de ce fournisseur
+            # (livraisons triees par date DESC dans get_livraisons)
+            db2 = conn()
+            row = db2.execute(
+                "SELECT id FROM livraisons WHERE fournisseur_id=? ORDER BY date_reception DESC LIMIT 1",
+                (fournisseur_id,)
+            ).fetchone()
+            db2.close()
+            if row:
+                return row["id"]
+            break
+    return None
+
 def fetch_factures_gmail(jours=30):
     try:
         EMAIL_ADDR = st.secrets["EMAIL_ADDRESS"]
@@ -345,7 +389,8 @@ def fetch_factures_gmail(jours=30):
             return []
 
         ids = data[0].split()
-        fournisseurs_noms = [f["nom"].lower() for f in get_fournisseurs()]
+        fournisseurs    = get_fournisseurs()
+        livraisons      = get_livraisons()
         keywords_invoice = ["facture", "invoice", "bon de livraison", "bl ", "commande", "livraison", "avoir"]
         found = []
 
@@ -361,9 +406,18 @@ def fetch_factures_gmail(jours=30):
                 sender   = _decode_str(msg.get("From", ""))
                 date_str = msg.get("Date", "")
 
-                text_low = (subject + " " + sender).lower()
-                is_fourn   = any(f in text_low for f in fournisseurs_noms)
+                text_low   = (subject + " " + sender).lower()
                 is_invoice = any(k in text_low for k in keywords_invoice)
+
+                # Detection automatique fournisseur
+                fourn_id, fourn_nom = _trouver_fourn(text_low, fournisseurs)
+                is_fourn = fourn_id is not None
+
+                # Detection automatique numero BL
+                num_bl_email = _extraire_numero_bl(subject) or _extraire_numero_bl(sender)
+
+                # Detection automatique livraison correspondante
+                livraison_id_auto = _trouver_livraison(num_bl_email, fourn_id, livraisons)
 
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
@@ -381,14 +435,18 @@ def fetch_factures_gmail(jours=30):
                     if not content:
                         continue
                     found.append({
-                        "filename":    filename,
-                        "content_b64": base64.b64encode(content).decode("utf-8"),
-                        "sender":      sender,
-                        "subject":     subject,
-                        "date":        date_str,
-                        "is_fourn":    is_fourn,
-                        "is_invoice":  is_invoice,
-                        "ext":         ext,
+                        "filename":         filename,
+                        "content_b64":      base64.b64encode(content).decode("utf-8"),
+                        "sender":           sender,
+                        "subject":          subject,
+                        "date":             date_str,
+                        "is_fourn":         is_fourn,
+                        "is_invoice":       is_invoice,
+                        "ext":              ext,
+                        "fourn_id":         fourn_id,
+                        "fourn_nom":        fourn_nom,
+                        "num_bl_email":     num_bl_email,
+                        "livraison_id_auto":livraison_id_auto,
                     })
             except Exception:
                 continue
@@ -709,20 +767,61 @@ def page_factures():
         lv_labels.append(f"{l['nom_fourn']} — {l['date_reception']}{bl}")
         lv_ids.append(l['id'])
 
+    # Bouton "Tout enregistrer automatiquement"
+    auto_matches = [f for f in filtered if f.get("livraison_id_auto") or f.get("fourn_id")]
+    if auto_matches:
+        st.info(f"🤖 {len(auto_matches)} facture(s) avec correspondance automatique detectee")
+        if st.button("⚡ Tout enregistrer automatiquement", use_container_width=True, key="btn_auto_all"):
+            for f in auto_matches:
+                sauvegarder_facture(
+                    f.get("livraison_id_auto"),
+                    f["filename"], f["content_b64"],
+                    f["sender"], f["subject"], f["date"]
+                )
+            st.success(f"✅ {len(auto_matches)} facture(s) enregistree(s) automatiquement !")
+            st.session_state.factures_found = [x for x in found if x not in auto_matches]
+            st.rerun()
+        st.divider()
+
     for i, f in enumerate(filtered):
-        tag = "✅ Fournisseur" if f["is_fourn"] else ("📄 Facture?" if f["is_invoice"] else "📎 Fichier")
-        with st.expander(f"{tag}  •  {f['filename']}"):
+        # Badge selon detection
+        if f.get("fourn_nom"):
+            tag = f"✅ {f['fourn_nom']}"
+        elif f["is_invoice"]:
+            tag = "📄 Facture"
+        else:
+            tag = "📎 Fichier"
+
+        bl_auto = f"→ BL detecte : {f['num_bl_email']}" if f.get("num_bl_email") else ""
+        with st.expander(f"{tag}  •  {f['filename']}  {bl_auto}"):
             st.caption(f"De : {f['sender']}")
             st.caption(f"Sujet : {f['subject']}")
             st.caption(f"Date : {f['date']}")
 
-            lien_sel = st.selectbox("Lier a un BL", lv_labels, key=f"lv_{i}")
-            if st.button("💾 Enregistrer cette facture", key=f"save_{i}", use_container_width=True):
+            # Pre-selection automatique du BL
+            default_idx = 0
+            if f.get("livraison_id_auto") and f["livraison_id_auto"] in lv_ids:
+                default_idx = lv_ids.index(f["livraison_id_auto"])
+            elif f.get("fourn_id"):
+                # Pre-selectionner le premier BL de ce fournisseur
+                for li, l in enumerate(livraisons):
+                    db3 = conn()
+                    fid = db3.execute("SELECT fournisseur_id FROM livraisons WHERE id=?", (l["id"],)).fetchone()
+                    db3.close()
+                    if fid and fid[0] == f["fourn_id"]:
+                        if l["id"] in lv_ids:
+                            default_idx = lv_ids.index(l["id"])
+                        break
+
+            if default_idx > 0:
+                st.success(f"🤖 Correspondance auto : {lv_labels[default_idx]}")
+
+            lien_sel = st.selectbox("Lier a un BL", lv_labels, index=default_idx, key=f"lv_{i}")
+            if st.button("💾 Enregistrer", key=f"save_{i}", use_container_width=True):
                 lid = lv_ids[lv_labels.index(lien_sel)]
                 sauvegarder_facture(lid, f['filename'], f['content_b64'], f['sender'], f['subject'], f['date'])
                 st.success(f"✅ '{f['filename']}' enregistree !")
-                # Retirer de la liste locale
-                st.session_state.factures_found = [x for j, x in enumerate(found) if x != f]
+                st.session_state.factures_found = [x for x in found if x != f]
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
