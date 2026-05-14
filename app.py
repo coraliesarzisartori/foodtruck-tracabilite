@@ -84,6 +84,9 @@ def init_db():
             nom             TEXT NOT NULL,
             numero_lot      TEXT,
             dlc             DATE,
+            temperature     REAL,
+            conformite      TEXT DEFAULT 'conforme',
+            notes           TEXT,
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (livraison_id)   REFERENCES livraisons(id),
             FOREIGN KEY (fournisseur_id) REFERENCES fournisseurs(id)
@@ -118,6 +121,9 @@ def init_db():
     # Migrations colonnes
     for migration in [
         "ALTER TABLE livraisons ADD COLUMN numero_bl TEXT",
+        "ALTER TABLE produits ADD COLUMN temperature REAL",
+        "ALTER TABLE produits ADD COLUMN conformite TEXT DEFAULT 'conforme'",
+        "ALTER TABLE produits ADD COLUMN notes TEXT",
     ]:
         try:
             db.execute(migration)
@@ -517,12 +523,18 @@ def page_reception():
                     if produits:
                         st.markdown(f"**{len(produits)} produit(s) :**")
                         for p in produits:
-                            lot = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
-                            dlc = f"DLC: {p['dlc']}" if p['dlc'] else "Pas de DLC"
-                            st.markdown(f"""<div class="card" style="margin:0.2rem 0; padding:0.5rem 1rem;">
-                                <strong>{p['nom']}</strong> &nbsp;
+                            lot  = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
+                            dlc  = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
+                            temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
+                            conf = p['conformite'] or "conforme"
+                            conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
+                            st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
+                                <strong>{p['nom']}</strong><br>
                                 <span class="badge-lot">{lot}</span>&nbsp;
-                                <span class="badge-dlc">{dlc}</span>
+                                <span class="badge-dlc">{dlc}</span>&nbsp;
+                                {f'<small>{temp}</small>' if temp else ''}
+                                <small> {conf_icon} {conf}</small>
+                                {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
                             </div>""", unsafe_allow_html=True)
                     else:
                         st.info("Aucun produit pour cette livraison.")
@@ -613,15 +625,12 @@ def page_reception():
                 fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
                 numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
                 date_rec   = st.date_input("Date de reception", value=date.today())
-                temp       = st.number_input("🌡️ Temperature a reception (°C)", value=4.0, step=0.5)
-                conformite = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
-                notes      = st.text_area("Notes", placeholder="Remarques sur la livraison...")
                 if st.form_submit_button("✅ Valider → Etape suivante"):
                     fourn_id = ids[noms.index(fourn_sel)]
                     db = conn()
                     cur = db.execute(
-                        "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?,?)",
-                        (fourn_id, numero_bl.strip() or None, date_rec, temp, conformite, notes)
+                        "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception) VALUES (?,?,?)",
+                        (fourn_id, numero_bl.strip() or None, date_rec)
                     )
                     livraison_id = cur.lastrowid
                     db.commit()
@@ -676,6 +685,13 @@ def page_reception():
                     except: pass
                 dlc = st.date_input("DLC", value=dlc_default)
 
+                col_t, col_c = st.columns(2)
+                with col_t:
+                    temp_prod = st.number_input("🌡️ Temperature (°C)", value=4.0, step=0.5)
+                with col_c:
+                    conf_prod = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
+                notes_prod = st.text_area("Notes", placeholder="Aspect, odeur, emballage...")
+
                 col1, col2 = st.columns(2)
                 with col1: encore   = st.form_submit_button("💾 + Produit suivant")
                 with col2: terminer = st.form_submit_button("✅ Terminer")
@@ -686,9 +702,9 @@ def page_reception():
                     else:
                         db = conn()
                         db.execute(
-                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,dlc) VALUES (?,?,?,?,?)",
+                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?)",
                             (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
-                             nom.strip(), lot.strip() or None, dlc)
+                             nom.strip(), lot.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None)
                         )
                         db.commit(); db.close()
                         st.session_state.rec_nb_produits += 1
@@ -728,12 +744,18 @@ def page_reception():
             if produits:
                 st.markdown(f"**🏷️ {len(produits)} produit(s) :**")
                 for p in produits:
-                    lot = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
-                    dlc = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
-                    st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
-                        <strong>{p['nom']}</strong> &nbsp;
+                    lot  = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
+                    dlc  = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
+                    temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
+                    conf = p['conformite'] or "conforme"
+                    conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
+                    st.markdown(f"""<div class="card" style="margin:0.3rem 0;padding:0.6rem 1rem;">
+                        <strong>{p['nom']}</strong><br>
                         <span class="badge-lot">{lot}</span>&nbsp;
-                        <span class="badge-dlc">{dlc}</span>
+                        <span class="badge-dlc">{dlc}</span>&nbsp;
+                        {f'<small>{temp}</small>' if temp else ''}
+                        <small> {conf_icon} {conf}</small>
+                        {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
                     </div>""", unsafe_allow_html=True)
 
             factures = get_factures(liv_id)
