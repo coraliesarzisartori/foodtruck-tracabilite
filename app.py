@@ -115,7 +115,7 @@ def init_db():
         );
     """)
     db.commit()
-    # Migrations
+    # Migrations colonnes
     for migration in [
         "ALTER TABLE livraisons ADD COLUMN numero_bl TEXT",
     ]:
@@ -124,6 +124,20 @@ def init_db():
             db.commit()
         except Exception:
             pass
+
+    # Migration donnees : rattache les produits orphelins a leur livraison la plus proche
+    db.execute("""
+        UPDATE produits
+        SET livraison_id = (
+            SELECT l.id FROM livraisons l
+            WHERE l.fournisseur_id = produits.fournisseur_id
+            ORDER BY ABS(julianday(l.date_reception) - julianday(produits.created_at))
+            LIMIT 1
+        )
+        WHERE livraison_id IS NULL
+          AND fournisseur_id IS NOT NULL
+    """)
+    db.commit()
     db.close()
 
 init_db()
@@ -483,14 +497,14 @@ def page_reception():
         else:
             st.write(f"**{len(livraisons)} livraison(s) enregistree(s)**")
             for l in livraisons:
-                bl_label = f"BL {l['numero_bl']}  •  " if l['numero_bl'] else ""
-                conf_icon = "✅" if l['conformite'] == "conforme" else ("⚠️" if l['conformite'] == "avec reserve" else "❌")
-                with st.expander(f"{conf_icon}  {bl_label}{l['nom_fourn']}  —  {l['date_reception']}"):
+                nb_produits = len(get_produits_livraison(l['id']))
+                bl_label    = l['numero_bl'] if l['numero_bl'] else "N° BL non renseigne"
+                conf_icon   = "✅" if l['conformite'] == "conforme" else ("⚠️" if l['conformite'] == "avec reserve" else "❌")
+                with st.expander(f"{conf_icon}  {bl_label}  •  {l['nom_fourn']}  •  {l['date_reception']}  ({nb_produits} produit(s))"):
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write(f"**Fournisseur :** {l['nom_fourn']}")
-                        if l['numero_bl']:
-                            st.write(f"**N° BL :** {l['numero_bl']}")
+                        st.write(f"**N° BL :** {l['numero_bl'] or '—'}")
                         st.write(f"**Date :** {l['date_reception']}")
                     with col2:
                         if l['temperature'] is not None:
@@ -511,7 +525,7 @@ def page_reception():
                                 <span class="badge-dlc">{dlc}</span>
                             </div>""", unsafe_allow_html=True)
                     else:
-                        st.info("Aucun produit enregistre pour cette livraison.")
+                        st.info("Aucun produit pour cette livraison.")
 
                     # Factures liees
                     factures = get_factures(l['id'])
@@ -525,6 +539,8 @@ def page_reception():
                                 fac['nom_fichier'], mime,
                                 key=f"histo_dl_{fac['id']}"
                             )
+                    else:
+                        st.caption("Aucune facture liee — va dans l'onglet Factures pour en ajouter.")
 
     with onglet_rec:
         step = st.session_state.get("rec_step", 1)
