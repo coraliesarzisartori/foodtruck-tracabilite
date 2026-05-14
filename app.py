@@ -357,48 +357,50 @@ def telecharger_proginov(lien_facture):
         return None, "PROGINOV non configure"
 
     try:
-        s = requests.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"
+        s  = requests.Session()
+        s.headers.update({"User-Agent": UA})
 
-        # 1. Recupere la page de login pour les cookies et champs hidden
+        # 1. Recupere la page de login (cookies de session Wicket)
         r = s.get(PROGINOV_LOGIN_URL, timeout=15)
 
-        # 2. Parse les champs du formulaire
-        data = {}
-        login_field = "login"
-        pass_field  = "password"
-        action_url  = PROGINOV_LOGIN_URL
+        # 2. Extrait l'URL d'action du formulaire (contient l'ID Wicket de session)
+        m_action = _re.search(r'<form[^>]+id=["\']id2["\'][^>]+action=["\']([^"\']+)["\']', r.text, _re.IGNORECASE)
+        if not m_action:
+            m_action = _re.search(r'action=["\'](\./connexion\.html\?[^"\']+formAuthent[^"\']*)["\']', r.text)
+        action_path = m_action.group(1) if m_action else "./connexion.html?0-1.-wicket_434-formAuthent"
+        action_url  = "https://www.proginov.fr/ProginovDemat/" + action_path.lstrip("./")
 
-        # Action du form
-        m = _re.search(r'<form[^>]+action=["\']([^"\']+)["\']', r.text, _re.IGNORECASE)
-        if m:
-            action = m.group(1)
-            action_url = action if action.startswith("http") else "https://www.proginov.fr" + action
+        # 3. Construit le POST avec les vrais noms de champs PROGINOV
+        data = {
+            "fUsr":                   prog_user,
+            "fPwd":                   prog_pass,
+            "cbCnxAuto":              "on",
+            "ipcnx":                  "",
+            "navigatorAppName":       "Netscape",
+            "navigatorAppVersion":    "5.0 (Windows)",
+            "navigatorAppCodeName":   "Mozilla",
+            "navigatorCookieEnabled": "true",
+            "navigatorJavaEnabled":   "false",
+            "navigatorLanguage":      "fr-FR",
+            "navigatorPlatform":      "Win32",
+            "navigatorUserAgent":     UA,
+            "navigatorWidth":         "1920",
+            "navigatorHeight":        "1080",
+            "screenWidth":            "1920",
+            "screenHeight":           "1080",
+            "screenColorDepth":       "24",
+            "utcOffset":              "-120",
+        }
 
-        # Tous les inputs
-        for inp in _re.finditer(r'<input([^>]+)>', r.text, _re.IGNORECASE):
-            attrs = inp.group(1)
-            t = (_re.search(r'type=["\']([^"\']+)["\']', attrs, _re.IGNORECASE) or _re.search(r'type=(\S+)', attrs, _re.IGNORECASE))
-            n = _re.search(r'name=["\']([^"\']+)["\']', attrs, _re.IGNORECASE)
-            v = _re.search(r'value=["\']([^"\']*)["\']', attrs, _re.IGNORECASE)
-            if not n: continue
-            field_type  = t.group(1).lower() if t else "text"
-            field_name  = n.group(1)
-            field_value = v.group(1) if v else ""
-            if field_type == "hidden":
-                data[field_name] = field_value
-            elif field_type in ("text", "email") and login_field == "login":
-                login_field = field_name
-            elif field_type == "password":
-                pass_field = field_name
-
-        data[login_field] = prog_user
-        data[pass_field]  = prog_pass
-
-        # 3. Connexion
+        # 4. Connexion
         r2 = s.post(action_url, data=data, timeout=15, allow_redirects=True)
 
-        # 4. Telecharge la facture avec la session authentifiee
+        # Verifie si connecte (page d'accueil apres login ne contient plus le form de connexion)
+        if "fUsr" in r2.text or "connexion" in r2.url.lower():
+            return None, "Identifiants PROGINOV incorrects ou connexion refusee"
+
+        # 5. Telecharge le PDF avec la session authentifiee
         r3 = s.get(lien_facture, timeout=20, allow_redirects=True)
 
         if r3.status_code == 200:
@@ -406,7 +408,7 @@ def telecharger_proginov(lien_facture):
             if "pdf" in ct.lower() or r3.content[:4] == b"%PDF":
                 return base64.b64encode(r3.content).decode("utf-8"), None
             else:
-                return None, "Connexion OK mais PDF non obtenu (session expiree ?)"
+                return None, "Connecte a PROGINOV mais PDF non obtenu"
         else:
             return None, f"Erreur HTTP {r3.status_code}"
 
