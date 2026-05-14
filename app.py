@@ -151,13 +151,19 @@ def appeler_mistral(prompt, image_data):
             }],
             "max_tokens": 500
         }
-        resp = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {MISTRAL_KEY}",
-                     "Content-Type": "application/json"},
-            json=payload,
-            timeout=30
-        )
+        import time
+        for tentative in range(3):
+            resp = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {MISTRAL_KEY}",
+                         "Content-Type": "application/json"},
+                json=payload,
+                timeout=30
+            )
+            if resp.status_code == 429:
+                time.sleep(5)
+                continue
+            break
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"].strip()
         if "```json" in text:
