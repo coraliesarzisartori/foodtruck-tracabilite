@@ -123,8 +123,21 @@ def lire_image(image_data, prompt):
     if not GEMINI_OK:
         return None
     try:
+        # Améliorer la qualité de l'image pour la lecture
         img = Image.open(io.BytesIO(image_data))
-        response = model.generate_content([prompt, img])
+        # Convertir en RGB si nécessaire
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        # Redimensionner si trop petite (améliore la lecture OCR)
+        w, h = img.size
+        if w < 800:
+            ratio = 800 / w
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+        response = model.generate_content(
+            [prompt, img],
+            generation_config={"temperature": 0.1}  # Plus précis, moins créatif
+        )
         text = response.text.strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -135,26 +148,34 @@ def lire_image(image_data, prompt):
         return {"erreur": str(e)}
 
 def lire_bl(image_data):
-    prompt = """Analyse ce bon de livraison (BL) alimentaire.
+    prompt = """Tu es un expert en lecture de documents alimentaires.
+Analyse attentivement ce bon de livraison (BL) et extrais toutes les informations visibles.
 Réponds UNIQUEMENT en JSON valide, sans texte avant ou après :
 {
-  "fournisseur": "nom de la société fournisseur",
+  "fournisseur": "nom de la société fournisseur (cherche: expéditeur, vendeur, fournisseur, société)",
   "date": "date au format YYYY-MM-DD (année courante 2026 si absente)",
   "produits": [{"nom": "nom produit", "quantite": "quantité + unité"}]
 }
-Si une info manque, mets null."""
+Si une info manque vraiment, mets null. Ne laisse pas de champ vide si l'info est visible."""
     return lire_image(image_data, prompt)
 
 def lire_etiquette(image_data):
-    prompt = """Analyse cette étiquette de produit alimentaire.
+    prompt = """Tu es un expert en lecture d'étiquettes alimentaires françaises.
+Analyse TRÈS attentivement cette étiquette et trouve TOUTES les informations suivantes.
+
+CHERCHE ABSOLUMENT :
+- Le numéro de lot : souvent écrit LOT, N°LOT, Lot n°, L:, Lot:, LOTE, Batch, numéro commençant par L
+- La DLC/DDM : souvent écrit DLC, DDM, À consommer avant le, À consommer de préférence avant, BBD, Use by, Best before, date imprimée en relief ou tampon
+
 Réponds UNIQUEMENT en JSON valide, sans texte avant ou après :
 {
-  "nom_produit": "nom complet du produit",
-  "numero_lot": "numéro de lot (cherche LOT, N°LOT, Lot:, L:, Batch)",
-  "dlc": "date limite au format YYYY-MM-DD (cherche DLC, DDM, BBD, Use by, À consommer avant)",
-  "marque": "marque si visible"
+  "nom_produit": "nom complet et précis du produit",
+  "marque": "marque ou fabricant si visible",
+  "numero_lot": "numéro de lot COMPLET tel qu'écrit (ex: L240051, LOT 2024-05, etc.)",
+  "dlc": "date limite au format YYYY-MM-DD - convertis si format JJ/MM/AAAA ou JJ.MM.AAAA"
 }
-Si une info manque, mets null."""
+
+IMPORTANT : Si tu vois des chiffres qui ressemblent à une date ou un numéro de lot, inclus-les même si le contexte n'est pas totalement clair. Mets null uniquement si vraiment invisible."""
     return lire_image(image_data, prompt)
 
 # ═══════════════════════════════════════════════════════════════
@@ -300,14 +321,22 @@ def page_reception():
         if photo:
             st.image(photo, use_container_width=True)
             if st.button("🤖 Lire l'étiquette", key=f"btn_etiq_{nb}"):
-                with st.spinner("Lecture…"):
+                with st.spinner("Analyse de l'étiquette en cours…"):
                     data = lire_etiquette(photo.getvalue())
                 if data and "erreur" not in data:
                     st.session_state.etiq_data = data
                     etiq = data
-                    st.success("✅ Étiquette lue !")
+                    # Compter ce qui a été trouvé
+                    trouves = [k for k, v in data.items() if v and v != "null"]
+                    manquants = [k for k, v in data.items() if not v or v == "null"]
+                    if len(trouves) >= 2:
+                        st.success(f"✅ Lu : {', '.join(trouves)}")
+                    else:
+                        st.warning("⚠️ Lecture partielle — complète les champs manquants ci-dessous.")
+                    if manquants:
+                        st.info(f"💡 Non trouvé : {', '.join(manquants)} — saisis-les manuellement.")
                 else:
-                    st.warning("Lecture partielle — vérifie les champs.")
+                    st.warning("⚠️ Lecture difficile — essaie de reprendre la photo plus près et bien éclairée, puis complète manuellement.")
 
         with st.form("form_produit"):
             nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
