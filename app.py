@@ -412,7 +412,17 @@ def fetch_factures_gmail(jours=30):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         mail.login(EMAIL_ADDR, EMAIL_PASS)
-        mail.select("INBOX")
+
+        # Cherche dans "Tous les messages" pour trouver aussi les emails classes dans des dossiers
+        dossier_ok = False
+        for dossier in ["[Gmail]/All Mail", "[Gmail]/Tous les messages", "INBOX"]:
+            status, _ = mail.select(dossier, readonly=True)
+            if status == "OK":
+                dossier_ok = True
+                break
+        if not dossier_ok:
+            mail.logout()
+            return {"erreur": "Impossible d'acceder aux emails Gmail"}
 
         since = (datetime.now() - timedelta(days=jours)).strftime("%d-%b-%Y")
         status, data = mail.search(None, f'SINCE {since}')
