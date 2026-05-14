@@ -55,15 +55,30 @@ try:
     import google.generativeai as genai
     GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=GEMINI_KEY)
-    # On liste les modeles disponibles pour choisir le bon
-    modeles_dispo = [m.name for m in genai.list_models()]
-    # Choisir le meilleur modele disponible
-    MODELE = "models/gemini-1.5-flash"
-    for candidat in ["models/gemini-1.5-flash", "models/gemini-pro-vision",
-                     "models/gemini-1.0-pro-vision", "models/gemini-pro"]:
-        if candidat in modeles_dispo:
+    # Lister uniquement les modeles qui supportent generateContent ET les images
+    tous = list(genai.list_models())
+    vision_ok = [
+        m for m in tous
+        if "generateContent" in m.supported_generation_methods
+    ]
+    MODELES_LISTES = [m.name for m in vision_ok]
+    # Priorite : flash > pro-vision > pro
+    MODELE = None
+    for candidat in [
+        "models/gemini-1.5-flash-latest",
+        "models/gemini-1.5-flash",
+        "models/gemini-1.5-flash-002",
+        "models/gemini-1.5-flash-001",
+        "models/gemini-1.5-pro-latest",
+        "models/gemini-1.5-pro",
+        "models/gemini-pro-vision",
+        "models/gemini-1.0-pro-vision-001",
+    ]:
+        if candidat in MODELES_LISTES:
             MODELE = candidat
             break
+    if not MODELE and MODELES_LISTES:
+        MODELE = MODELES_LISTES[0]
     model_gemini = genai.GenerativeModel(MODELE)
     GEMINI_OK = True
 except Exception as e:
@@ -570,6 +585,9 @@ def page_parametres():
     st.subheader("🤖 IA")
     if GEMINI_OK:
         st.success(f"Modele actif : {MODELE}")
+        with st.expander("Tous les modeles disponibles pour ta cle"):
+            for m in MODELES_LISTES:
+                st.write(f"• {m}")
     else:
         st.error("IA non connectee — verifie la cle API dans Secrets")
     st.caption("v1.2 — FoodTruck Tracabilite HACCP")
