@@ -1,10 +1,9 @@
 import streamlit as st
 import sqlite3
 import json
-import os
 from datetime import datetime, date
 import google.generativeai as genai
-from PIL import Image
+from PIL import Image, ImageEnhance
 import io
 import pandas as pd
 
@@ -12,7 +11,7 @@ import pandas as pd
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="FoodTruck Traçabilité",
+    page_title="FoodTruck Tracabilite",
     page_icon="🚚",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -49,17 +48,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI SETUP
+#  GEMINI SETUP — gemini-1.5-pro : gratuit + meilleur OCR
 # ═══════════════════════════════════════════════════════════════
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-1.5-pro")
     GEMINI_OK = True
 except Exception:
     GEMINI_OK = False
 
 # ═══════════════════════════════════════════════════════════════
-#  BASE DE DONNÉES
+#  BASE DE DONNEES
 # ═══════════════════════════════════════════════════════════════
 DB = "tracabilite.db"
 
@@ -120,106 +119,67 @@ init_db()
 #  FONCTIONS IA
 # ═══════════════════════════════════════════════════════════════
 def preparer_image(image_data):
-    """Optimise l'image pour la lecture OCR."""
-    from PIL import ImageEnhance, ImageFilter
     img = Image.open(io.BytesIO(image_data))
     if img.mode != 'RGB':
         img = img.convert('RGB')
-    # Agrandir si nécessaire
     w, h = img.size
     if w < 1000:
         ratio = 1000 / w
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    # Améliorer le contraste et la netteté
     img = ImageEnhance.Contrast(img).enhance(1.5)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
     return img
 
-def lire_image(image_data, prompt):
+def parser_json(text):
+    text = text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    return json.loads(text)
+
+def lire_bl(image_data):
     if not GEMINI_OK:
-        return None
+        return {"erreur": "Cle API non configuree"}
     try:
         img = preparer_image(image_data)
+        prompt = (
+            "Tu es un expert en lecture de documents alimentaires. "
+            "Analyse ce bon de livraison et extrais les infos. "
+            "Reponds UNIQUEMENT en JSON valide: "
+            "{\"fournisseur\": \"nom societe fournisseur\", "
+            "\"date\": \"YYYY-MM-DD\", "
+            "\"produits\": [{\"nom\": \"nom produit\", \"quantite\": \"qte + unite\"}]} "
+            "Si une info manque mets null."
+        )
         response = model.generate_content([prompt, img])
-        text = response.text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        return json.loads(text)
+        return parser_json(response.text)
     except Exception as e:
         return {"erreur": str(e)}
 
-def lire_tout_texte(image_data):
-    """Étape 1 : lit tout le texte brut de l'image."""
+def lire_etiquette(image_data):
     if not GEMINI_OK:
-        return "", "Clé API non configurée"
+        return {"erreur": "Cle API non configuree"}
     try:
         img = preparer_image(image_data)
-        response = model.generate_content([
-            "Lis et retranscris TOUT le texte visible sur cette étiquette alimentaire, "
-            "exactement comme tu le vois, mot pour mot, chiffre pour chiffre. "
-            "N'interprète pas, ne résume pas, copie tout.",
-            img
-        ])
-        return response.text.strip(), None
+        prompt = (
+            "Tu es un expert OCR specialise en etiquettes alimentaires. "
+            "Lis TOUT le texte visible sur cette etiquette. "
+            "Reponds UNIQUEMENT en JSON valide: "
+            "{\"_texte_brut\": \"tout le texte mot pour mot\", "
+            "\"nom_produit\": \"nom complet du produit\", "
+            "\"marque\": \"marque ou fabricant\", "
+            "\"numero_lot\": \"numero de lot EXACT (cherche LOT Lot n L Batch)\", "
+            "\"dlc\": \"date limite YYYY-MM-DD (cherche DLC DDM BBD A consommer avant - convertis JJ/MM/AA)\"} "
+            "Si absent mets null. Inclus les chiffres meme si contexte incertain."
+        )
+        response = model.generate_content([prompt, img])
+        return parser_json(response.text)
     except Exception as e:
-        return "", str(e)
-
-def extraire_infos_depuis_texte(texte_brut):
-    """Étape 2 : extrait les infos structurées depuis le texte brut."""
-    if not texte_brut:
-        return {}
-    try:
-        response = model.generate_content(f"""Voici le texte d'une étiquette alimentaire :
-
-{texte_brut}
-
-Extrais ces informations et réponds UNIQUEMENT en JSON valide :
-{{
-  "nom_produit": "nom du produit",
-  "marque": "marque ou fabricant",
-  "numero_lot": "numéro de lot (cherche LOT, L, Lot n°, Batch - prends tous les chiffres/lettres qui suivent)",
-  "dlc": "date limite au format YYYY-MM-DD (cherche DLC, DDM, À consommer avant, BBD - convertis JJ/MM/AA ou JJ/MM/AAAA)"
-}}
-Si une info est absente du texte, mets null.""")
-        text = response.text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-        return json.loads(text)
-    except Exception:
-        return {}
-
-def lire_bl(image_data):
-    prompt = """Tu es un expert en lecture de documents alimentaires.
-Analyse attentivement ce bon de livraison (BL) et extrais toutes les informations visibles.
-Réponds UNIQUEMENT en JSON valide, sans texte avant ou après :
-{
-  "fournisseur": "nom de la société fournisseur (cherche: expéditeur, vendeur, fournisseur, société)",
-  "date": "date au format YYYY-MM-DD (année courante 2026 si absente)",
-  "produits": [{"nom": "nom produit", "quantite": "quantité + unité"}]
-}
-Si une info manque vraiment, mets null. Ne laisse pas de champ vide si l'info est visible."""
-    return lire_image(image_data, prompt)
-
-def lire_etiquette(image_data):
-    """Lecture en 2 étapes : d'abord tout le texte, puis extraction structurée."""
-    # Étape 1 : lire tout le texte brut
-    texte_brut, erreur = lire_tout_texte(image_data)
-    if not texte_brut:
-        return {"erreur": erreur or "Impossible de lire le texte"}
-
-    # Étape 2 : extraire les infos depuis le texte
-    infos = extraire_infos_depuis_texte(texte_brut)
-
-    # Garder le texte brut pour affichage debug si besoin
-    infos["_texte_brut"] = texte_brut
-    return infos
+        return {"erreur": str(e)}
 
 # ═══════════════════════════════════════════════════════════════
-#  FONCTIONS BASE DE DONNÉES
+#  FONCTIONS BASE DE DONNEES
 # ═══════════════════════════════════════════════════════════════
 def get_fournisseurs():
     db = conn()
@@ -266,7 +226,7 @@ def rechercher_lot(numero_lot):
         SELECT DISTINCT
             p.id, p.nom, p.numero_lot, p.dlc, p.created_at,
             f.nom AS fourn,
-            l.date_reception, l.temperature, l.conformite, l.notes AS livraison_notes,
+            l.date_reception, l.temperature, l.conformite,
             prep.id AS prep_id, prep.date_prep, prep.heure_prep, prep.notes AS prep_notes
         FROM produits p
         JOIN fournisseurs f ON p.fournisseur_id = f.id
@@ -280,16 +240,15 @@ def rechercher_lot(numero_lot):
     return rows
 
 # ═══════════════════════════════════════════════════════════════
-#  PAGE : RÉCEPTION
+#  PAGE : RECEPTION
 # ═══════════════════════════════════════════════════════════════
 def page_reception():
-    st.header("📦 Réception livraison")
+    st.header("📦 Reception livraison")
 
     step = st.session_state.get("rec_step", 1)
 
-    # ── ÉTAPE 1 : BL ──────────────────────────────────────────
     if step == 1:
-        st.markdown('<div class="step-indicator">Étape 1 / 3 — Bon de livraison</div>', unsafe_allow_html=True)
+        st.markdown('<div class="step-indicator">Etape 1 / 3 — Bon de livraison</div>', unsafe_allow_html=True)
 
         photo = st.camera_input("📷 Photo du BL", key="cam_bl")
         if not photo:
@@ -300,14 +259,15 @@ def page_reception():
         if photo:
             st.image(photo, use_container_width=True)
             if st.button("🤖 Lire automatiquement", key="btn_lire_bl"):
-                with st.spinner("Lecture IA en cours…"):
+                with st.spinner("Lecture IA en cours..."):
                     data = lire_bl(photo.getvalue())
                 if data and "erreur" not in data:
                     st.session_state.bl_data = data
                     bl_data = data
                     st.success("✅ BL lu !")
                 else:
-                    st.warning("Lecture incomplète — vérifie les champs ci-dessous.")
+                    err = data.get("erreur", "?") if data else "Aucune reponse"
+                    st.error(f"Erreur: {err}")
 
         fournisseurs = get_fournisseurs()
         if not fournisseurs:
@@ -326,10 +286,10 @@ def page_reception():
 
         with st.form("form_bl"):
             fourn_sel  = st.selectbox("Fournisseur", noms, index=default_fourn)
-            date_rec   = st.date_input("Date de réception", value=date.today())
-            temp       = st.number_input("🌡️ Température (°C)", value=4.0, step=0.5, min_value=-30.0, max_value=60.0)
-            conformite = st.selectbox("Conformité", ["conforme", "non conforme", "avec réserve"])
-            notes      = st.text_area("Notes", placeholder="Remarques éventuelles…")
+            date_rec   = st.date_input("Date de reception", value=date.today())
+            temp       = st.number_input("Température (°C)", value=4.0, step=0.5, min_value=-30.0, max_value=60.0)
+            conformite = st.selectbox("Conformite", ["conforme", "non conforme", "avec reserve"])
+            notes      = st.text_area("Notes", placeholder="Remarques eventuelles...")
             valider    = st.form_submit_button("✅ Valider la livraison →")
 
             if valider:
@@ -347,12 +307,11 @@ def page_reception():
                 db.close()
                 st.rerun()
 
-    # ── ÉTAPE 2 : ÉTIQUETTES ──────────────────────────────────
     elif step == 2:
         nb = st.session_state.get("rec_nb_produits", 0)
-        st.markdown(f'<div class="step-indicator">Étape 2 / 3 — Produits ({nb} enregistré{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="step-indicator">Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
 
-        photo = st.camera_input("📷 Photo de l'étiquette", key=f"cam_et_{nb}")
+        photo = st.camera_input("📷 Photo de l'etiquette", key=f"cam_et_{nb}")
         if not photo:
             photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{nb}")
 
@@ -360,27 +319,22 @@ def page_reception():
 
         if photo:
             st.image(photo, use_container_width=True)
-            if st.button("🤖 Lire l'étiquette", key=f"btn_etiq_{nb}"):
-                with st.spinner("Analyse de l'étiquette en cours…"):
+            if st.button("🤖 Lire l'etiquette", key=f"btn_etiq_{nb}"):
+                with st.spinner("Lecture en cours..."):
                     data = lire_etiquette(photo.getvalue())
                 if data and "erreur" not in data:
                     st.session_state.etiq_data = data
                     etiq = data
                     champs = ["nom_produit", "marque", "numero_lot", "dlc"]
-                    trouves   = [k for k in champs if data.get(k) and data[k] != "null"]
-                    manquants = [k for k in champs if not data.get(k) or data[k] == "null"]
-                    if len(trouves) >= 2:
-                        st.success(f"✅ Trouvé : {', '.join(trouves)}")
-                    else:
-                        st.warning("⚠️ Lecture partielle — complète les champs ci-dessous.")
-                    # Afficher le texte brut lu pour vérification
+                    trouves = [k for k in champs if data.get(k) and data[k] != "null"]
+                    st.success(f"✅ Trouve : {', '.join(trouves) if trouves else 'rien - complete manuellement'}")
                     if data.get("_texte_brut"):
                         with st.expander("👁️ Texte brut lu par l'IA"):
                             st.code(data["_texte_brut"])
                 else:
-                    erreur_msg = data.get("erreur", "Inconnue") if data else "Aucune réponse"
-                    st.error(f"❌ Erreur : {erreur_msg}")
-                    st.info("💡 Complète les champs manuellement ci-dessous.")
+                    err = data.get("erreur", "?") if data else "Aucune reponse"
+                    st.error(f"Erreur: {err}")
+                    st.info("Complete les champs manuellement ci-dessous.")
 
         with st.form("form_produit"):
             nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
@@ -398,7 +352,7 @@ def page_reception():
             with col1:
                 encore = st.form_submit_button("💾 Enregistrer + suivant")
             with col2:
-                terminer = st.form_submit_button("✅ Terminer la réception")
+                terminer = st.form_submit_button("✅ Terminer la reception")
 
             if encore or terminer:
                 if not nom.strip():
@@ -423,25 +377,24 @@ def page_reception():
             st.session_state.rec_step = 3
             st.rerun()
 
-    # ── ÉTAPE 3 : CONFIRMATION ────────────────────────────────
     elif step == 3:
         nb = st.session_state.get("rec_nb_produits", 0)
-        st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} enregistrée avec {nb} produit(s) !")
+        st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} enregistree avec {nb} produit(s) !")
         st.balloons()
-        if st.button("📦 Nouvelle réception"):
+        if st.button("📦 Nouvelle reception"):
             for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
-#  PAGE : PRÉPARATION
+#  PAGE : PREPARATION
 # ═══════════════════════════════════════════════════════════════
 def page_preparation():
-    st.header("👨‍🍳 Nouvelle préparation")
+    st.header("👨‍🍳 Nouvelle preparation")
 
     fournisseurs = get_fournisseurs()
     if not fournisseurs:
-        st.info("Aucun produit disponible. Commence par faire une réception !")
+        st.info("Aucun produit disponible. Commence par faire une reception !")
         return
 
     options = ["Tous"] + [f["nom"] for f in fournisseurs]
@@ -454,10 +407,10 @@ def page_preparation():
         produits = get_produits(fourn_id)
 
     if not produits:
-        st.info("Aucun produit pour ce fournisseur. Fais d'abord une réception !")
+        st.info("Aucun produit pour ce fournisseur. Fais d'abord une reception !")
         return
 
-    st.subheader("Coche les produits utilisés")
+    st.subheader("Coche les produits utilises")
     selectionnes = []
     for p in produits:
         lot_txt = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
@@ -469,10 +422,10 @@ def page_preparation():
     if selectionnes:
         st.divider()
         with st.form("form_prep"):
-            d = st.date_input("Date de préparation", value=date.today())
+            d = st.date_input("Date de preparation", value=date.today())
             h = st.time_input("Heure",               value=datetime.now().time())
-            n = st.text_area("Notes", placeholder="Description de la préparation…")
-            if st.form_submit_button("✅ Enregistrer la préparation"):
+            n = st.text_area("Notes", placeholder="Description de la preparation...")
+            if st.form_submit_button("✅ Enregistrer la preparation"):
                 db = conn()
                 cur = db.execute(
                     "INSERT INTO preparations (date_prep,heure_prep,notes) VALUES (?,?,?)",
@@ -486,24 +439,24 @@ def page_preparation():
                     )
                 db.commit()
                 db.close()
-                st.success(f"✅ Préparation #{prep_id} enregistrée avec {len(selectionnes)} produit(s) !")
+                st.success(f"✅ Preparation #{prep_id} enregistree avec {len(selectionnes)} produit(s) !")
                 st.balloons()
                 st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
-#  PAGE : TRAÇABILITÉ
+#  PAGE : TRACABILITE
 # ═══════════════════════════════════════════════════════════════
 def page_tracabilite():
-    st.header("🔍 Traçabilité")
+    st.header("🔍 Tracabilite")
 
     tab1, tab2 = st.tabs(["🔎 Recherche par lot", "📋 Tous les produits"])
 
     with tab1:
-        lot_q = st.text_input("Numéro de lot", placeholder="Ex: L240051")
+        lot_q = st.text_input("Numero de lot", placeholder="Ex: L240051")
         if lot_q:
             resultats = rechercher_lot(lot_q)
             if not resultats:
-                st.warning(f"Aucun résultat pour « {lot_q} »")
+                st.warning(f"Aucun resultat pour << {lot_q} >>")
             else:
                 for r in resultats:
                     with st.expander(f"📦 {r['nom']}  —  LOT: {r['numero_lot'] or '?'}", expanded=True):
@@ -516,17 +469,17 @@ def page_tracabilite():
                         with col2:
                             st.markdown("**Livraison**")
                             st.write(f"Fournisseur : {r['fourn']}")
-                            st.write(f"Date réception : {r['date_reception'] or '—'}")
+                            st.write(f"Date reception : {r['date_reception'] or '—'}")
                             if r['temperature'] is not None:
-                                st.write(f"Température : {r['temperature']}°C")
-                            st.write(f"Conformité : {r['conformite'] or '—'}")
-                        st.markdown("**Préparation**")
+                                st.write(f"Temperature : {r['temperature']}C")
+                            st.write(f"Conformite : {r['conformite'] or '—'}")
+                        st.markdown("**Preparation**")
                         if r['date_prep']:
-                            st.success(f"✅ Préparé le {r['date_prep']} à {r['heure_prep']}")
+                            st.success(f"✅ Prepare le {r['date_prep']} a {r['heure_prep']}")
                             if r['prep_notes']:
                                 st.write(f"Notes : {r['prep_notes']}")
                         else:
-                            st.info("Non utilisé en préparation pour l'instant.")
+                            st.info("Non utilise en preparation pour l'instant.")
 
     with tab2:
         fournisseurs = get_fournisseurs()
@@ -540,7 +493,7 @@ def page_tracabilite():
             produits = get_produits(fid)
 
         if not produits:
-            st.info("Aucun produit enregistré.")
+            st.info("Aucun produit enregistre.")
         else:
             for p in produits:
                 st.markdown(f"""
@@ -548,12 +501,12 @@ def page_tracabilite():
                     <strong>{p['nom']}</strong><br>
                     <span class="badge-lot">LOT: {p['numero_lot'] or '—'}</span>&nbsp;
                     <span class="badge-dlc">DLC: {p['dlc'] or '—'}</span><br>
-                    <small>📦 {p['fourn']}  •  Reçu le {p['date_reception'] or '?'}</small>
+                    <small>📦 {p['fourn']}  •  Recu le {p['date_reception'] or '?'}</small>
                 </div>
                 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  PAGE : PARAMÈTRES
+#  PAGE : PARAMETRES
 # ═══════════════════════════════════════════════════════════════
 def page_parametres():
     st.header("⚙️ Configuration")
@@ -568,14 +521,14 @@ def page_parametres():
         if st.form_submit_button("Ajouter"):
             if nouveau.strip():
                 if ajouter_fournisseur(nouveau.strip()):
-                    st.success(f"✅ {nouveau} ajouté !")
+                    st.success(f"✅ {nouveau} ajoute !")
                     st.rerun()
                 else:
-                    st.error("Ce fournisseur existe déjà.")
+                    st.error("Ce fournisseur existe deja.")
 
     st.divider()
-    st.subheader("💾 Sauvegarde des données")
-    st.caption("Télécharge tes données en CSV pour les garder en sécurité.")
+    st.subheader("💾 Sauvegarde des donnees")
+    st.caption("Telecharge tes donnees en CSV pour les garder en securite.")
 
     db = conn()
     df_produits = pd.read_sql_query("""
@@ -604,17 +557,17 @@ def page_parametres():
         st.download_button("📥 Export Produits", df_produits.to_csv(index=False).encode("utf-8"),
                            f"produits_{date.today()}.csv", "text/csv", use_container_width=True)
     with col2:
-        st.download_button("📥 Export Préparations", df_preps.to_csv(index=False).encode("utf-8"),
+        st.download_button("📥 Export Preparations", df_preps.to_csv(index=False).encode("utf-8"),
                            f"preparations_{date.today()}.csv", "text/csv", use_container_width=True)
 
     st.divider()
-    st.caption("v1.0 — FoodTruck Traçabilité HACCP")
+    st.caption("v1.1 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
 #  NAVIGATION
 # ═══════════════════════════════════════════════════════════════
 def main():
-    tab1, tab2, tab3, tab4 = st.tabs(["📦 Réception", "👨‍🍳 Prépa", "🔍 Traça", "⚙️ Config"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📦 Reception", "👨‍🍳 Prepa", "🔍 Traca", "⚙️ Config"])
     with tab1: page_reception()
     with tab2: page_preparation()
     with tab3: page_tracabilite()
