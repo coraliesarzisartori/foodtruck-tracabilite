@@ -440,7 +440,7 @@ def fetch_factures_gmail(jours=30):
         keywords_invoice = ["facture", "invoice", "bon de livraison", "bl ", "commande", "livraison", "avoir"]
         found = []
 
-        for eid in ids[-150:]:
+        for eid in ids[-500:]:
             try:
                 status, msg_data = mail.fetch(eid, "(RFC822)")
                 if status != "OK":
@@ -934,7 +934,7 @@ def page_factures():
     st.subheader("🔄 Synchroniser depuis Gmail")
     col1, col2 = st.columns([3, 1])
     with col1:
-        jours = st.slider("Chercher dans les derniers X jours", 7, 90, 30, key="fac_jours")
+        jours = st.slider("Chercher dans les derniers X jours", 7, 365, 30, key="fac_jours")
     with col2:
         sync = st.button("🔄 Lancer", use_container_width=True, key="btn_sync")
 
@@ -956,13 +956,13 @@ def page_factures():
     # Filtres
     col_a, col_b = st.columns(2)
     with col_a:
-        show_all = st.checkbox("Tout afficher (pas seulement fournisseurs)", value=False)
+        show_all = st.checkbox("Tout afficher (pas seulement fournisseurs)", value=True)
     with col_b:
         st.caption(f"{len(found)} fichier(s) au total")
 
     filtered = found if show_all else [x for x in found if x["is_fourn"] or x["is_invoice"]]
     if not filtered:
-        st.info("Aucune facture detectee. Coche 'Tout afficher' pour voir tous les fichiers.")
+        st.info("Aucun fichier trouve.")
         return
 
     st.write(f"**{len(filtered)} fichier(s) detecte(s) comme factures/BL**")
