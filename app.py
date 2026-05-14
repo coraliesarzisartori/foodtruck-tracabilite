@@ -373,6 +373,33 @@ def _extraire_numero_bl(texte):
             return m.group(1).strip()
     return None
 
+def _extraire_numero_facture(texte):
+    """Extrait un numero de facture depuis le sujet email."""
+    patterns = [
+        r'(?:facture\s*N°?[\s:]*|invoice\s*N°?[\s:]*)([A-Z0-9][-A-Z0-9]{4,20})',
+        r'(?:N°|#)\s*([0-9]{5,15})',
+        r'\b([0-9]{8,15})\b',
+    ]
+    for pat in patterns:
+        m = _re.search(pat, texte, _re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def _extraire_liens_body(msg):
+    """Extrait les URLs du corps de l'email."""
+    urls = []
+    for part in msg.walk():
+        ct = part.get_content_type()
+        if ct in ("text/plain", "text/html"):
+            try:
+                body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                found = _re.findall(r'https?://[^\s<>"\']{10,}', body)
+                urls.extend(found)
+            except Exception:
+                pass
+    return list(dict.fromkeys(urls))  # deduplique
+
 def _trouver_fourn(text_low, fournisseurs):
     """Retourne (id, nom) du fournisseur detecte, ou (None, None)."""
     for f in fournisseurs:
@@ -465,6 +492,7 @@ def fetch_factures_gmail(jours=30):
                 # Detection automatique livraison correspondante
                 livraison_id_auto = _trouver_livraison(num_bl_email, fourn_id, livraisons)
 
+                has_attachment = False
                 for part in msg.walk():
                     if part.get_content_maintype() == "multipart":
                         continue
@@ -480,6 +508,7 @@ def fetch_factures_gmail(jours=30):
                     content = part.get_payload(decode=True)
                     if not content:
                         continue
+                    has_attachment = True
                     found.append({
                         "filename":         filename,
                         "content_b64":      base64.b64encode(content).decode("utf-8"),
@@ -493,6 +522,31 @@ def fetch_factures_gmail(jours=30):
                         "fourn_nom":        fourn_nom,
                         "num_bl_email":     num_bl_email,
                         "livraison_id_auto":livraison_id_auto,
+                        "lien":             None,
+                    })
+
+                # Email sans PJ mais avec "facture" dans sujet → facture via lien
+                if not has_attachment and is_invoice:
+                    num_fac = _extraire_numero_facture(subject)
+                    liens   = _extraire_liens_body(msg)
+                    lien_fac = liens[0] if liens else None
+                    fname = f"FACTURE_{num_fac or 'lien'}.txt"
+                    info  = f"Facture: {subject}\nDe: {sender}\nDate: {date_str}\nLien: {lien_fac or 'non trouve'}"
+                    found.append({
+                        "filename":         fname,
+                        "content_b64":      base64.b64encode(info.encode()).decode("utf-8"),
+                        "sender":           sender,
+                        "subject":          subject,
+                        "date":             date_str,
+                        "is_fourn":         is_fourn,
+                        "is_invoice":       True,
+                        "ext":              "txt",
+                        "fourn_id":         fourn_id,
+                        "fourn_nom":        fourn_nom,
+                        "num_bl_email":     num_bl_email,
+                        "livraison_id_auto":livraison_id_auto,
+                        "lien":             lien_fac,
+                        "num_facture":      num_fac,
                     })
             except Exception:
                 continue
@@ -994,18 +1048,23 @@ def page_factures():
 
     for i, f in enumerate(filtered):
         # Badge selon detection
-        if f.get("fourn_nom"):
+        if f.get("lien") and f.get("ext") == "txt":
+            tag = "🔗 Facture via lien"
+        elif f.get("fourn_nom"):
             tag = f"✅ {f['fourn_nom']}"
         elif f["is_invoice"]:
             tag = "📄 Facture"
         else:
             tag = "📎 Fichier"
 
-        bl_auto = f"→ BL detecte : {f['num_bl_email']}" if f.get("num_bl_email") else ""
-        with st.expander(f"{tag}  •  {f['filename']}  {bl_auto}"):
+        num_fac_label = f"N° {f['num_facture']}  •  " if f.get("num_facture") else ""
+        bl_auto = f"→ BL : {f['num_bl_email']}" if f.get("num_bl_email") else ""
+        with st.expander(f"{tag}  •  {num_fac_label}{f['filename']}  {bl_auto}"):
             st.caption(f"De : {f['sender']}")
             st.caption(f"Sujet : {f['subject']}")
             st.caption(f"Date : {f['date']}")
+            if f.get("lien"):
+                st.markdown(f"📥 **[Cliquer ici pour telecharger la facture]({f['lien']})**")
 
             # Pre-selection automatique du BL
             default_idx = 0
