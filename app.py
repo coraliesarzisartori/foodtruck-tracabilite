@@ -266,11 +266,20 @@ def rechercher_lot(numero_lot):
 def get_livraisons():
     db = conn()
     rows = db.execute("""
-        SELECT l.id, l.numero_bl, l.date_reception, f.nom AS nom_fourn
+        SELECT l.id, l.numero_bl, l.date_reception, l.temperature, l.conformite, l.notes,
+               f.nom AS nom_fourn
         FROM livraisons l
         JOIN fournisseurs f ON l.fournisseur_id = f.id
         ORDER BY l.date_reception DESC
     """).fetchall()
+    db.close()
+    return rows
+
+def get_produits_livraison(livraison_id):
+    db = conn()
+    rows = db.execute("""
+        SELECT * FROM produits WHERE livraison_id = ? ORDER BY created_at ASC
+    """, (livraison_id,)).fetchall()
     db.close()
     return rows
 
@@ -465,126 +474,179 @@ def fetch_factures_gmail(jours=30):
 # ═══════════════════════════════════════════════════════════════
 def page_reception():
     st.header("📦 Reception livraison")
-    step = st.session_state.get("rec_step", 1)
+    onglet_rec, onglet_histo = st.tabs(["➕ Nouvelle reception", "📋 Historique livraisons"])
 
-    if step == 1:
-        st.markdown('<div class="step-indicator">Etape 1 / 3 — Bon de livraison</div>', unsafe_allow_html=True)
-        photo = st.camera_input("📷 Photo du BL", key="cam_bl")
-        if not photo:
-            photo = st.file_uploader("Ou importe depuis la galerie", type=["jpg","jpeg","png"], key="up_bl")
+    with onglet_histo:
+        livraisons = get_livraisons()
+        if not livraisons:
+            st.info("Aucune livraison enregistree pour l'instant.")
+        else:
+            st.write(f"**{len(livraisons)} livraison(s) enregistree(s)**")
+            for l in livraisons:
+                bl_label = f"BL {l['numero_bl']}  •  " if l['numero_bl'] else ""
+                conf_icon = "✅" if l['conformite'] == "conforme" else ("⚠️" if l['conformite'] == "avec reserve" else "❌")
+                with st.expander(f"{conf_icon}  {bl_label}{l['nom_fourn']}  —  {l['date_reception']}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Fournisseur :** {l['nom_fourn']}")
+                        if l['numero_bl']:
+                            st.write(f"**N° BL :** {l['numero_bl']}")
+                        st.write(f"**Date :** {l['date_reception']}")
+                    with col2:
+                        if l['temperature'] is not None:
+                            st.write(f"**Temperature :** {l['temperature']}°C")
+                        st.write(f"**Conformite :** {l['conformite']}")
+                        if l['notes']:
+                            st.write(f"**Notes :** {l['notes']}")
 
-        bl_data = st.session_state.get("bl_data", {})
+                    produits = get_produits_livraison(l['id'])
+                    if produits:
+                        st.markdown(f"**{len(produits)} produit(s) :**")
+                        for p in produits:
+                            lot = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
+                            dlc = f"DLC: {p['dlc']}" if p['dlc'] else "Pas de DLC"
+                            st.markdown(f"""<div class="card" style="margin:0.2rem 0; padding:0.5rem 1rem;">
+                                <strong>{p['nom']}</strong> &nbsp;
+                                <span class="badge-lot">{lot}</span>&nbsp;
+                                <span class="badge-dlc">{dlc}</span>
+                            </div>""", unsafe_allow_html=True)
+                    else:
+                        st.info("Aucun produit enregistre pour cette livraison.")
 
-        if photo:
-            st.image(photo, use_container_width=True)
-            if st.button("🤖 Lire automatiquement", key="btn_bl"):
-                with st.spinner("Lecture en cours..."):
-                    data = lire_bl(photo.getvalue())
-                if data and "erreur" not in data:
-                    st.session_state.bl_data = data
-                    bl_data = data
-                    st.success("✅ BL lu !")
-                else:
-                    st.error(data.get("erreur","Erreur") if data else "Erreur")
+                    # Factures liees
+                    factures = get_factures(l['id'])
+                    if factures:
+                        st.markdown(f"**📎 {len(factures)} facture(s) liee(s) :**")
+                        for fac in factures:
+                            mime = "application/pdf" if fac['nom_fichier'].endswith(".pdf") else "image/jpeg"
+                            st.download_button(
+                                f"📥 {fac['nom_fichier']}",
+                                base64.b64decode(fac['contenu_b64']),
+                                fac['nom_fichier'], mime,
+                                key=f"histo_dl_{fac['id']}"
+                            )
 
-        fournisseurs = get_fournisseurs()
-        if not fournisseurs:
-            st.warning("Aucun fournisseur. Va dans Config pour en ajouter.")
-            return
+    with onglet_rec:
+        step = st.session_state.get("rec_step", 1)
 
-        noms = [f["nom"] for f in fournisseurs]
-        ids  = [f["id"]  for f in fournisseurs]
-        default = 0
-        if bl_data.get("fournisseur"):
-            for i, n in enumerate(noms):
-                if bl_data["fournisseur"].lower() in n.lower():
-                    default = i; break
+        if step == 1:
+            st.markdown('<div class="step-indicator">Etape 1 / 3 — Bon de livraison</div>', unsafe_allow_html=True)
+            photo = st.camera_input("📷 Photo du BL", key="cam_bl")
+            if not photo:
+                photo = st.file_uploader("Ou importe depuis la galerie", type=["jpg","jpeg","png"], key="up_bl")
 
-        with st.form("form_bl"):
-            fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
-            numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
-            date_rec   = st.date_input("Date de reception", value=date.today())
-            temp       = st.number_input("Température (°C)", value=4.0, step=0.5)
-            conformite = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
-            notes      = st.text_area("Notes", placeholder="Remarques...")
-            if st.form_submit_button("✅ Valider →"):
-                fourn_id = ids[noms.index(fourn_sel)]
-                db = conn()
-                cur = db.execute(
-                    "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?,?)",
-                    (fourn_id, numero_bl.strip() or None, date_rec, temp, conformite, notes)
-                )
-                db.commit()
-                st.session_state.rec_livraison_id   = cur.lastrowid
-                st.session_state.rec_fournisseur_id = fourn_id
-                st.session_state.rec_nb_produits    = 0
-                st.session_state.rec_step           = 2
-                db.close()
-                st.rerun()
+            bl_data = st.session_state.get("bl_data", {})
 
-    elif step == 2:
-        nb = st.session_state.get("rec_nb_produits", 0)
-        st.markdown(f'<div class="step-indicator">Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
+            if photo:
+                st.image(photo, use_container_width=True)
+                if st.button("🤖 Lire automatiquement", key="btn_bl"):
+                    with st.spinner("Lecture en cours..."):
+                        data = lire_bl(photo.getvalue())
+                    if data and "erreur" not in data:
+                        st.session_state.bl_data = data
+                        bl_data = data
+                        st.success("✅ BL lu !")
+                    else:
+                        st.error(data.get("erreur","Erreur") if data else "Erreur")
 
-        photo = st.camera_input("📷 Photo de l'etiquette", key=f"cam_et_{nb}")
-        if not photo:
-            photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{nb}")
+            fournisseurs = get_fournisseurs()
+            if not fournisseurs:
+                st.warning("Aucun fournisseur. Va dans Config pour en ajouter.")
+                st.stop()
 
-        etiq = st.session_state.get("etiq_data", {})
+            noms = [f["nom"] for f in fournisseurs]
+            ids  = [f["id"]  for f in fournisseurs]
+            default = 0
+            if bl_data.get("fournisseur"):
+                for i, n in enumerate(noms):
+                    if bl_data["fournisseur"].lower() in n.lower():
+                        default = i; break
 
-        if photo:
-            st.image(photo, use_container_width=True)
-            if st.button("🤖 Lire l'etiquette", key=f"btn_et_{nb}"):
-                with st.spinner("Lecture en cours..."):
-                    data = lire_etiquette(photo.getvalue())
-                if data and "erreur" not in data:
-                    st.session_state.etiq_data = data
-                    etiq = data
-                    trouves = [k for k,v in data.items() if v and v != "null"]
-                    st.success(f"✅ Lu : {', '.join(trouves)}")
-                else:
-                    st.error(data.get("erreur","Erreur") if data else "Erreur")
-
-        with st.form("form_produit"):
-            nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
-            lot = st.text_input("N° de lot",       value=etiq.get("numero_lot")  or "")
-            dlc_default = date.today()
-            if etiq.get("dlc"):
-                try: dlc_default = datetime.strptime(etiq["dlc"], "%Y-%m-%d").date()
-                except: pass
-            dlc = st.date_input("DLC", value=dlc_default)
-
-            col1, col2 = st.columns(2)
-            with col1: encore   = st.form_submit_button("💾 Enregistrer + suivant")
-            with col2: terminer = st.form_submit_button("✅ Terminer")
-
-            if encore or terminer:
-                if not nom.strip():
-                    st.error("Nom obligatoire.")
-                else:
+            with st.form("form_bl"):
+                fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
+                numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
+                date_rec   = st.date_input("Date de reception", value=date.today())
+                temp       = st.number_input("Température (°C)", value=4.0, step=0.5)
+                conformite = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
+                notes      = st.text_area("Notes", placeholder="Remarques...")
+                if st.form_submit_button("✅ Valider →"):
+                    fourn_id = ids[noms.index(fourn_sel)]
                     db = conn()
-                    db.execute(
-                        "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,dlc) VALUES (?,?,?,?,?)",
-                        (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
-                         nom.strip(), lot.strip() or None, dlc)
+                    cur = db.execute(
+                        "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?,?)",
+                        (fourn_id, numero_bl.strip() or None, date_rec, temp, conformite, notes)
                     )
-                    db.commit(); db.close()
-                    st.session_state.rec_nb_produits += 1
-                    st.session_state.pop("etiq_data", None)
-                    if terminer: st.session_state.rec_step = 3
+                    db.commit()
+                    st.session_state.rec_livraison_id   = cur.lastrowid
+                    st.session_state.rec_fournisseur_id = fourn_id
+                    st.session_state.rec_nb_produits    = 0
+                    st.session_state.rec_step           = 2
+                    db.close()
                     st.rerun()
 
-        if st.button("➡️ Terminer sans ajouter"):
-            st.session_state.rec_step = 3
-            st.rerun()
+        elif step == 2:
+            nb = st.session_state.get("rec_nb_produits", 0)
+            st.markdown(f'<div class="step-indicator">Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
 
-    elif step == 3:
-        nb = st.session_state.get("rec_nb_produits", 0)
-        st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} — {nb} produit(s) enregistre(s) !")
-        if st.button("📦 Nouvelle reception"):
-            for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
-                st.session_state.pop(k, None)
-            st.rerun()
+            photo = st.camera_input("📷 Photo de l'etiquette", key=f"cam_et_{nb}")
+            if not photo:
+                photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{nb}")
+
+            etiq = st.session_state.get("etiq_data", {})
+
+            if photo:
+                st.image(photo, use_container_width=True)
+                if st.button("🤖 Lire l'etiquette", key=f"btn_et_{nb}"):
+                    with st.spinner("Lecture en cours..."):
+                        data = lire_etiquette(photo.getvalue())
+                    if data and "erreur" not in data:
+                        st.session_state.etiq_data = data
+                        etiq = data
+                        trouves = [k for k,v in data.items() if v and v != "null"]
+                        st.success(f"✅ Lu : {', '.join(trouves)}")
+                    else:
+                        st.error(data.get("erreur","Erreur") if data else "Erreur")
+
+            with st.form("form_produit"):
+                nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
+                lot = st.text_input("N° de lot",       value=etiq.get("numero_lot")  or "")
+                dlc_default = date.today()
+                if etiq.get("dlc"):
+                    try: dlc_default = datetime.strptime(etiq["dlc"], "%Y-%m-%d").date()
+                    except: pass
+                dlc = st.date_input("DLC", value=dlc_default)
+
+                col1, col2 = st.columns(2)
+                with col1: encore   = st.form_submit_button("💾 Enregistrer + suivant")
+                with col2: terminer = st.form_submit_button("✅ Terminer")
+
+                if encore or terminer:
+                    if not nom.strip():
+                        st.error("Nom obligatoire.")
+                    else:
+                        db = conn()
+                        db.execute(
+                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,dlc) VALUES (?,?,?,?,?)",
+                            (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
+                             nom.strip(), lot.strip() or None, dlc)
+                        )
+                        db.commit(); db.close()
+                        st.session_state.rec_nb_produits += 1
+                        st.session_state.pop("etiq_data", None)
+                        if terminer: st.session_state.rec_step = 3
+                        st.rerun()
+
+            if st.button("➡️ Terminer sans ajouter"):
+                st.session_state.rec_step = 3
+                st.rerun()
+
+        elif step == 3:
+            nb = st.session_state.get("rec_nb_produits", 0)
+            st.success(f"✅ Livraison #{st.session_state.rec_livraison_id} — {nb} produit(s) enregistre(s) !")
+            if st.button("📦 Nouvelle reception"):
+                for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE : PREPARATION
