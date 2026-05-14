@@ -66,6 +66,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS livraisons (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             fournisseur_id  INTEGER NOT NULL,
+            numero_bl       TEXT,
             date_reception  DATE NOT NULL,
             temperature     REAL,
             conformite      TEXT DEFAULT 'conforme',
@@ -100,6 +101,12 @@ def init_db():
         );
     """)
     db.commit()
+    # Migration : ajoute numero_bl si la colonne n'existe pas encore
+    try:
+        db.execute("ALTER TABLE livraisons ADD COLUMN numero_bl TEXT")
+        db.commit()
+    except Exception:
+        pass
     db.close()
 
 init_db()
@@ -171,6 +178,7 @@ def lire_bl(image_data):
         "Analyse ce bon de livraison alimentaire. "
         "Reponds UNIQUEMENT en JSON valide: "
         "{\"fournisseur\": \"nom societe\", "
+        "\"numero_bl\": \"numero du bon de livraison (BL, N° BL, Bon N°, reference)\", "
         "\"date\": \"date YYYY-MM-DD\", "
         "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
         "Si absent mets null."
@@ -225,7 +233,7 @@ def rechercher_lot(numero_lot):
         SELECT DISTINCT
             p.id, p.nom, p.numero_lot, p.dlc, p.created_at,
             f.nom AS fourn,
-            l.date_reception, l.temperature, l.conformite,
+            l.numero_bl, l.date_reception, l.temperature, l.conformite,
             prep.id AS prep_id, prep.date_prep, prep.heure_prep, prep.notes AS prep_notes
         FROM produits p
         JOIN fournisseurs f ON p.fournisseur_id = f.id
@@ -280,6 +288,7 @@ def page_reception():
 
         with st.form("form_bl"):
             fourn_sel  = st.selectbox("Fournisseur", noms, index=default)
+            numero_bl  = st.text_input("N° du BL", value=bl_data.get("numero_bl") or "", placeholder="Ex: BL-2024-0051")
             date_rec   = st.date_input("Date de reception", value=date.today())
             temp       = st.number_input("Température (°C)", value=4.0, step=0.5)
             conformite = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
@@ -288,8 +297,8 @@ def page_reception():
                 fourn_id = ids[noms.index(fourn_sel)]
                 db = conn()
                 cur = db.execute(
-                    "INSERT INTO livraisons (fournisseur_id,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?)",
-                    (fourn_id, date_rec, temp, conformite, notes)
+                    "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,temperature,conformite,notes) VALUES (?,?,?,?,?,?)",
+                    (fourn_id, numero_bl.strip() or None, date_rec, temp, conformite, notes)
                 )
                 db.commit()
                 st.session_state.rec_livraison_id   = cur.lastrowid
@@ -433,6 +442,8 @@ def page_tracabilite():
                         with col2:
                             st.markdown("**Livraison**")
                             st.write(f"Fournisseur : {r['fourn']}")
+                            if r['numero_bl']:
+                                st.write(f"N° BL : {r['numero_bl']}")
                             st.write(f"Reception : {r['date_reception'] or '—'}")
                             if r['temperature'] is not None:
                                 st.write(f"Temperature : {r['temperature']}°C")
