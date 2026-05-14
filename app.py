@@ -344,6 +344,76 @@ def supprimer_facture(facture_id):
     db.close()
 
 # ═══════════════════════════════════════════════════════════════
+#  PROGINOV — telechargement automatique
+# ═══════════════════════════════════════════════════════════════
+PROGINOV_LOGIN_URL = "https://www.proginov.fr/ProginovDemat/connexion.html"
+
+def telecharger_proginov(lien_facture):
+    """Se connecte a PROGINOV et telecharge le PDF de la facture."""
+    try:
+        prog_user = st.secrets["PROGINOV_LOGIN"]
+        prog_pass = st.secrets["PROGINOV_PASSWORD"]
+    except Exception:
+        return None, "PROGINOV non configure"
+
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+
+        # 1. Recupere la page de login pour les cookies et champs hidden
+        r = s.get(PROGINOV_LOGIN_URL, timeout=15)
+
+        # 2. Parse les champs du formulaire
+        data = {}
+        login_field = "login"
+        pass_field  = "password"
+        action_url  = PROGINOV_LOGIN_URL
+
+        # Action du form
+        m = _re.search(r'<form[^>]+action=["\']([^"\']+)["\']', r.text, _re.IGNORECASE)
+        if m:
+            action = m.group(1)
+            action_url = action if action.startswith("http") else "https://www.proginov.fr" + action
+
+        # Tous les inputs
+        for inp in _re.finditer(r'<input([^>]+)>', r.text, _re.IGNORECASE):
+            attrs = inp.group(1)
+            t = (_re.search(r'type=["\']([^"\']+)["\']', attrs, _re.IGNORECASE) or _re.search(r'type=(\S+)', attrs, _re.IGNORECASE))
+            n = _re.search(r'name=["\']([^"\']+)["\']', attrs, _re.IGNORECASE)
+            v = _re.search(r'value=["\']([^"\']*)["\']', attrs, _re.IGNORECASE)
+            if not n: continue
+            field_type  = t.group(1).lower() if t else "text"
+            field_name  = n.group(1)
+            field_value = v.group(1) if v else ""
+            if field_type == "hidden":
+                data[field_name] = field_value
+            elif field_type in ("text", "email") and login_field == "login":
+                login_field = field_name
+            elif field_type == "password":
+                pass_field = field_name
+
+        data[login_field] = prog_user
+        data[pass_field]  = prog_pass
+
+        # 3. Connexion
+        r2 = s.post(action_url, data=data, timeout=15, allow_redirects=True)
+
+        # 4. Telecharge la facture avec la session authentifiee
+        r3 = s.get(lien_facture, timeout=20, allow_redirects=True)
+
+        if r3.status_code == 200:
+            ct = r3.headers.get("Content-Type", "")
+            if "pdf" in ct.lower() or r3.content[:4] == b"%PDF":
+                return base64.b64encode(r3.content).decode("utf-8"), None
+            else:
+                return None, "Connexion OK mais PDF non obtenu (session expiree ?)"
+        else:
+            return None, f"Erreur HTTP {r3.status_code}"
+
+    except Exception as e:
+        return None, str(e)
+
+# ═══════════════════════════════════════════════════════════════
 #  GMAIL — recuperation factures
 # ═══════════════════════════════════════════════════════════════
 def _decode_str(s):
@@ -533,8 +603,20 @@ def fetch_factures_gmail(jours=30):
                     pdf_auto = None
 
                     # Tente de telecharger le PDF depuis chaque lien
+                    PROGINOV_OK = ("PROGINOV_LOGIN" in st.secrets and "PROGINOV_PASSWORD" in st.secrets)
+
                     for lien in liens[:5]:
                         try:
+                            # Lien PROGINOV → connexion authentifiee
+                            if "proginov" in lien.lower() and PROGINOV_OK:
+                                pdf_b64, err = telecharger_proginov(lien)
+                                if pdf_b64:
+                                    pdf_auto = pdf_b64
+                                    lien_fac = lien
+                                    break
+                                continue
+
+                            # Lien direct (sans auth)
                             r = requests.get(lien, timeout=15, allow_redirects=True,
                                              headers={"User-Agent": "Mozilla/5.0"})
                             ct = r.headers.get("Content-Type", "")
@@ -542,12 +624,10 @@ def fetch_factures_gmail(jours=30):
                                 pdf_auto = base64.b64encode(r.content).decode("utf-8")
                                 lien_fac = lien
                                 break
-                            elif r.status_code == 200 and len(r.content) > 5000:
-                                # Essaye quand meme si gros fichier binaire
-                                if r.content[:4] == b"%PDF":
-                                    pdf_auto = base64.b64encode(r.content).decode("utf-8")
-                                    lien_fac = lien
-                                    break
+                            elif r.status_code == 200 and r.content[:4] == b"%PDF":
+                                pdf_auto = base64.b64encode(r.content).decode("utf-8")
+                                lien_fac = lien
+                                break
                         except Exception:
                             continue
 
@@ -1164,6 +1244,21 @@ def page_config():
         st.success("✅ GPT-4o-mini connecte — lecture automatique active !")
     else:
         st.error("❌ Cle OpenAI manquante — ajoute OPENAI_API_KEY dans Secrets")
+
+    st.divider()
+    st.subheader("🏢 PROGINOV (Relais d'Or)")
+    PROG_OK = ("PROGINOV_LOGIN" in st.secrets and "PROGINOV_PASSWORD" in st.secrets)
+    if PROG_OK:
+        st.success("✅ PROGINOV configure — telechargement auto des factures Relais d'Or actif !")
+    else:
+        st.warning("❌ PROGINOV non configure")
+        st.markdown("""
+Dans **Streamlit Secrets**, ajoute :
+```
+PROGINOV_LOGIN = "ton_identifiant_proginov"
+PROGINOV_PASSWORD = "ton_mot_de_passe_proginov"
+```
+        """)
 
     st.divider()
     st.subheader("📧 Email (Factures Gmail)")
