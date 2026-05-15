@@ -597,68 +597,15 @@ def fetch_factures_gmail(jours=30):
                         "lien":             None,
                     })
 
-                # Email sans PJ mais avec "facture" dans sujet → tente de telecharger via lien
+                # Email sans PJ mais avec "facture" dans sujet → note le lien (telechargement separe)
                 if not has_attachment and is_invoice:
                     num_fac  = _extraire_numero_facture(subject)
                     liens    = _extraire_liens_body(msg)
-                    lien_fac = None
-                    pdf_auto = None
-
-                    # Tente de telecharger le PDF depuis chaque lien
-                    PROGINOV_OK = ("PROGINOV_LOGIN" in st.secrets and "PROGINOV_PASSWORD" in st.secrets)
-
-                    for lien in liens[:5]:
-                        try:
-                            # Lien PROGINOV → connexion authentifiee
-                            if "proginov" in lien.lower() and PROGINOV_OK:
-                                pdf_b64, err = telecharger_proginov(lien)
-                                if pdf_b64:
-                                    pdf_auto = pdf_b64
-                                    lien_fac = lien
-                                    break
-                                continue
-
-                            # Lien direct (sans auth)
-                            r = requests.get(lien, timeout=15, allow_redirects=True,
-                                             headers={"User-Agent": "Mozilla/5.0"})
-                            ct = r.headers.get("Content-Type", "")
-                            if r.status_code == 200 and ("pdf" in ct.lower() or lien.lower().endswith(".pdf")):
-                                pdf_auto = base64.b64encode(r.content).decode("utf-8")
-                                lien_fac = lien
-                                break
-                            elif r.status_code == 200 and r.content[:4] == b"%PDF":
-                                pdf_auto = base64.b64encode(r.content).decode("utf-8")
-                                lien_fac = lien
-                                break
-                        except Exception:
-                            continue
-
-                    if pdf_auto:
-                        # PDF telecharge automatiquement !
-                        fname = f"FACTURE_{num_fac or 'auto'}.pdf"
-                        found.append({
-                            "filename":         fname,
-                            "content_b64":      pdf_auto,
-                            "sender":           sender,
-                            "subject":          subject,
-                            "date":             date_str,
-                            "is_fourn":         is_fourn,
-                            "is_invoice":       True,
-                            "ext":              "pdf",
-                            "fourn_id":         fourn_id,
-                            "fourn_nom":        fourn_nom,
-                            "num_bl_email":     num_bl_email,
-                            "livraison_id_auto":livraison_id_auto,
-                            "lien":             lien_fac,
-                            "num_facture":      num_fac,
-                            "auto_downloaded":  True,
-                        })
-                    else:
-                        # Lien necessite connexion — on garde la reference
-                        lien_fac = liens[0] if liens else None
-                        fname = f"FACTURE_{num_fac or 'lien'}.txt"
-                        info  = f"Facture: {subject}\nDe: {sender}\nDate: {date_str}\nLien: {lien_fac or 'non trouve'}"
-                        found.append({
+                    lien_fac = liens[0] if liens else None
+                    fname    = f"FACTURE_{num_fac or 'lien'}.txt"
+                    info     = f"Facture: {subject}\nDe: {sender}\nDate: {date_str}\nLien: {lien_fac or 'non trouve'}"
+                    is_prog  = lien_fac and "proginov" in lien_fac.lower()
+                    found.append({
                             "filename":         fname,
                             "content_b64":      base64.b64encode(info.encode()).decode("utf-8"),
                             "sender":           sender,
@@ -674,6 +621,7 @@ def fetch_factures_gmail(jours=30):
                             "lien":             lien_fac,
                             "num_facture":      num_fac,
                             "auto_downloaded":  False,
+                            "is_proginov":      is_prog,
                         })
             except Exception:
                 continue
@@ -1193,7 +1141,22 @@ def page_factures():
             st.caption(f"Sujet : {f['subject']}")
             st.caption(f"Date : {f['date']}")
             if f.get("lien"):
-                st.markdown(f"📥 **[Cliquer ici pour telecharger la facture]({f['lien']})**")
+                st.markdown(f"📥 **[Ouvrir la facture]({f['lien']})**")
+            if f.get("is_proginov") and ("PROGINOV_LOGIN" in st.secrets):
+                if st.button("⚡ Telecharger PDF via PROGINOV", key=f"prog_{i}", use_container_width=True):
+                    with st.spinner("Connexion a PROGINOV..."):
+                        pdf_b64, err = telecharger_proginov(f["lien"])
+                    if pdf_b64:
+                        st.success("✅ PDF recupere !")
+                        # Remplace le contenu txt par le vrai PDF
+                        f["content_b64"] = pdf_b64
+                        f["filename"]    = f["filename"].replace(".txt", ".pdf")
+                        f["ext"]         = "pdf"
+                        f["auto_downloaded"] = True
+                        st.download_button("📥 Telecharger le PDF", base64.b64decode(pdf_b64),
+                                           f["filename"], "application/pdf", key=f"dl_prog_{i}")
+                    else:
+                        st.error(f"Erreur PROGINOV : {err}")
 
             # Pre-selection automatique du BL
             default_idx = 0
