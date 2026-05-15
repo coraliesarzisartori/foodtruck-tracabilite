@@ -205,6 +205,48 @@ def appeler_gpt(prompt, image_data):
     except Exception as e:
         return {"erreur": str(e)}
 
+def appeler_gpt_texte(prompt):
+    """Appel GPT texte seul (sans image) — pour PDFs numeriques."""
+    if not AI_OK:
+        return {"erreur": "Cle OpenAI non configuree"}
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"erreur": str(e)}
+
+def lire_bl_pdf(pdf_bytes):
+    """Lit un BL au format PDF : extrait le texte puis interroge GPT."""
+    texte = extraire_texte_pdf(pdf_bytes)
+    if not texte.strip():
+        return {"erreur": "PDF scanné ou texte non extractible — essaie une photo"}
+    prompt = (
+        f"Voici le texte extrait d'un bon de livraison alimentaire :\n\n{texte[:3000]}\n\n"
+        "Reponds UNIQUEMENT en JSON valide: "
+        "{\"fournisseur\": \"nom societe\", "
+        "\"numero_bl\": \"numero du bon de livraison (BL, N° BL, Bon N°, reference)\", "
+        "\"date\": \"date YYYY-MM-DD\", "
+        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
+        "Si absent mets null."
+    )
+    return appeler_gpt_texte(prompt)
+
 def lire_etiquette(image_data):
     prompt = (
         "Tu es expert en etiquettes alimentaires francaises. "
@@ -811,14 +853,28 @@ def page_reception():
             st.markdown("**📷 Photo du Bon de Livraison**")
             photo_bl = st.camera_input("Prends une photo du BL", key="cam_bl")
             if not photo_bl:
-                photo_bl = st.file_uploader("Ou importe depuis la galerie", type=["jpg","jpeg","png"], key="up_bl")
+                photo_bl = st.file_uploader("Ou importe depuis la galerie (JPG, PNG, PDF)",
+                                            type=["jpg","jpeg","png","pdf"], key="up_bl")
 
             bl_data = st.session_state.get("bl_data", {})
             if photo_bl:
-                st.image(photo_bl, use_container_width=True)
+                bl_nom     = getattr(photo_bl, "name", "bl.jpg")
+                bl_est_pdf = bl_nom.lower().endswith(".pdf")
+
+                if bl_est_pdf:
+                    # Apercu PDF
+                    b64_bl = base64.b64encode(photo_bl.getvalue()).decode()
+                    st.markdown(
+                        f'<iframe src="data:application/pdf;base64,{b64_bl}" '
+                        f'width="100%" height="420px" style="border-radius:8px;border:1px solid #ddd;"></iframe>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.image(photo_bl, use_container_width=True)
+
                 if st.button("🤖 Lire le BL automatiquement", key="btn_bl"):
                     with st.spinner("Lecture BL en cours..."):
-                        data = lire_bl(photo_bl.getvalue())
+                        data = lire_bl_pdf(photo_bl.getvalue()) if bl_est_pdf else lire_bl(photo_bl.getvalue())
                     if data and "erreur" not in data:
                         st.session_state.bl_data = data
                         bl_data = data
