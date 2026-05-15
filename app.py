@@ -838,7 +838,7 @@ def page_reception():
                             temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
                             conf = p['conformite'] or "conforme"
                             conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
-                            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
+                            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p["quantite"] if "quantite" in p.keys() else None else ""
                             st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
                                 <strong>{p['nom']}</strong><br>
                                 <span class="badge-lot">{lot}</span>&nbsp;
@@ -1163,7 +1163,7 @@ def page_reception():
                     temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
                     conf = p['conformite'] or "conforme"
                     conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
-                    qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
+                    qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p["quantite"] if "quantite" in p.keys() else None else ""
                     st.markdown(f"""<div class="card" style="margin:0.3rem 0;padding:0.6rem 1rem;">
                         <strong>{p['nom']}</strong><br>
                         <span class="badge-lot">{lot}</span>&nbsp;
@@ -1279,7 +1279,7 @@ def page_tracabilite():
         produits = get_produits() if filtre == "Tous" else get_produits(
             next(f["id"] for f in fournisseurs if f["nom"] == filtre))
         for p in produits:
-            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
+            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p["quantite"] if "quantite" in p.keys() else None else ""
             st.markdown(f"""<div class="card">
                 <strong>{p['nom']}</strong><br>
                 <span class="badge-lot">LOT: {p['numero_lot'] or '—'}</span>&nbsp;
