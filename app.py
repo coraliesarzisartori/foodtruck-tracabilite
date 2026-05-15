@@ -1142,21 +1142,25 @@ def page_factures():
             st.caption(f"Date : {f['date']}")
             if f.get("lien"):
                 st.markdown(f"📥 **[Ouvrir la facture]({f['lien']})**")
-            if f.get("is_proginov") and ("PROGINOV_LOGIN" in st.secrets):
+            # Bouton PROGINOV pour toute facture via lien quand credentials configures
+            PROG_OK = ("PROGINOV_LOGIN" in st.secrets and "PROGINOV_PASSWORD" in st.secrets)
+            if f.get("ext") == "txt" and PROG_OK:
+                lien_pour_prog = f.get("lien") or ""
                 if st.button("⚡ Telecharger PDF via PROGINOV", key=f"prog_{i}", use_container_width=True):
                     with st.spinner("Connexion a PROGINOV..."):
-                        pdf_b64, err = telecharger_proginov(f["lien"])
+                        pdf_b64, err = telecharger_proginov(lien_pour_prog) if lien_pour_prog else (None, "Pas de lien disponible")
                     if pdf_b64:
+                        fname_pdf = f["filename"].replace(".txt", ".pdf")
                         st.success("✅ PDF recupere !")
-                        # Remplace le contenu txt par le vrai PDF
-                        f["content_b64"] = pdf_b64
-                        f["filename"]    = f["filename"].replace(".txt", ".pdf")
-                        f["ext"]         = "pdf"
-                        f["auto_downloaded"] = True
                         st.download_button("📥 Telecharger le PDF", base64.b64decode(pdf_b64),
-                                           f["filename"], "application/pdf", key=f"dl_prog_{i}")
+                                           fname_pdf, "application/pdf", key=f"dl_prog_{i}")
+                        # Sauvegarde directement
+                        lid = lv_ids[lv_labels.index(st.session_state.get(f"lv_{i}_val", lv_labels[0]))] if lv_labels else None
+                        sauvegarder_facture(lid, fname_pdf, pdf_b64, f["sender"], f["subject"], f["date"])
+                        st.session_state.factures_found = [x for x in found if x != f]
+                        st.rerun()
                     else:
-                        st.error(f"Erreur PROGINOV : {err}")
+                        st.error(f"Erreur : {err}")
 
             # Pre-selection automatique du BL
             default_idx = 0
