@@ -419,6 +419,23 @@ def get_produits_livraison(livraison_id):
     db.close()
     return rows
 
+def modifier_produit(produit_id, nom, lot, quantite, dlc, temperature, conformite, notes):
+    db = conn()
+    db.execute("""
+        UPDATE produits
+        SET nom=?, numero_lot=?, quantite=?, dlc=?, temperature=?, conformite=?, notes=?
+        WHERE id=?
+    """, (nom, lot or None, quantite or None, str(dlc), temperature, conformite, notes or None, produit_id))
+    db.commit()
+    db.close()
+
+def supprimer_produit(produit_id):
+    db = conn()
+    db.execute("DELETE FROM preparation_produits WHERE produit_id=?", (produit_id,))
+    db.execute("DELETE FROM produits WHERE id=?", (produit_id,))
+    db.commit()
+    db.close()
+
 def sauvegarder_facture(livraison_id, nom_fichier, contenu_b64, expediteur, sujet, date_email):
     db = conn()
     db.execute("""
@@ -836,27 +853,108 @@ def page_reception():
                             st.write(f"**Notes :** {l['notes']}")
 
                     produits = get_produits_livraison(l['id'])
-                    if produits:
-                        st.markdown(f"**{len(produits)} produit(s) :**")
-                        for p in produits:
-                            lot  = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
-                            dlc  = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
-                            temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
-                            conf = p['conformite'] or "conforme"
-                            conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
-                            _qte = p["quantite"] if "quantite" in p.keys() else None
-                            qte_badge = f'<span class="badge-qte">📦 {_qte}</span>&nbsp;' if _qte else ""
+                    st.markdown(f"**{len(produits)} produit(s) :**" if produits else "**Produits :**")
+                    for p in produits:
+                        _qte      = p["quantite"] if "quantite" in p.keys() else None
+                        lot_txt   = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
+                        dlc_txt   = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
+                        temp_txt  = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
+                        conf_val  = p['conformite'] or "conforme"
+                        conf_icon = "✅" if conf_val == "conforme" else ("⚠️" if conf_val == "avec reserve" else "❌")
+                        qte_badge = f'<span class="badge-qte">📦 {_qte}</span>&nbsp;' if _qte else ""
+                        edit_key  = f"edit_prod_{p['id']}"
+
+                        if not st.session_state.get(edit_key):
                             st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
                                 <strong>{p['nom']}</strong><br>
-                                <span class="badge-lot">{lot}</span>&nbsp;
-                                <span class="badge-dlc">{dlc}</span>&nbsp;
+                                <span class="badge-lot">{lot_txt}</span>&nbsp;
+                                <span class="badge-dlc">{dlc_txt}</span>&nbsp;
                                 {qte_badge}
-                                {f'<small>{temp}</small>' if temp else ''}
-                                <small> {conf_icon} {conf}</small>
+                                {f'<small>{temp_txt}</small>' if temp_txt else ''}
+                                <small> {conf_icon} {conf_val}</small>
                                 {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
                             </div>""", unsafe_allow_html=True)
+                            col_e, col_d = st.columns(2)
+                            with col_e:
+                                if st.button("✏️ Modifier", key=f"btn_edit_{p['id']}", use_container_width=True):
+                                    st.session_state[edit_key] = True
+                                    st.rerun()
+                            with col_d:
+                                if st.button("🗑️ Retirer", key=f"btn_del_prod_{p['id']}", use_container_width=True):
+                                    supprimer_produit(p['id'])
+                                    st.rerun()
+                        else:
+                            st.markdown(f"**✏️ Modifier : {p['nom']}**")
+                            conf_opts = ["conforme", "non conforme", "avec reserve"]
+                            dlc_edit_default = date.today()
+                            if p['dlc']:
+                                try: dlc_edit_default = datetime.strptime(str(p['dlc']), "%Y-%m-%d").date()
+                                except: pass
+                            with st.form(f"form_edit_prod_{p['id']}"):
+                                nom_e = st.text_input("Nom", value=p['nom'])
+                                col_le, col_qe = st.columns(2)
+                                with col_le: lot_e = st.text_input("N° de lot", value=p['numero_lot'] or "")
+                                with col_qe: qte_e = st.text_input("Quantite",  value=_qte or "")
+                                dlc_e = st.date_input("DLC", value=dlc_edit_default)
+                                col_te, col_ce = st.columns(2)
+                                with col_te:
+                                    temp_e = st.number_input("🌡️ Temp. (°C)", value=float(p['temperature'] or 4.0), step=0.5)
+                                with col_ce:
+                                    conf_e = st.selectbox("Conformite", conf_opts,
+                                                          index=conf_opts.index(conf_val) if conf_val in conf_opts else 0)
+                                notes_e = st.text_area("Notes", value=p['notes'] or "")
+                                col_sv, col_cx = st.columns(2)
+                                with col_sv: do_save   = st.form_submit_button("💾 Sauvegarder", use_container_width=True)
+                                with col_cx: do_cancel = st.form_submit_button("❌ Annuler",      use_container_width=True)
+                                if do_save:
+                                    modifier_produit(p['id'], nom_e.strip(), lot_e.strip(), qte_e.strip(), dlc_e, temp_e, conf_e, notes_e)
+                                    st.session_state.pop(edit_key, None)
+                                    st.rerun()
+                                if do_cancel:
+                                    st.session_state.pop(edit_key, None)
+                                    st.rerun()
+
+                    # ── Ajouter un produit à ce BL ─────────────────
+                    add_key = f"add_prod_liv_{l['id']}"
+                    if not st.session_state.get(add_key):
+                        if st.button("➕ Ajouter un produit", key=f"btn_add_{l['id']}", use_container_width=True):
+                            st.session_state[add_key] = True
+                            st.rerun()
                     else:
-                        st.info("Aucun produit pour cette livraison.")
+                        st.markdown("**➕ Nouveau produit**")
+                        db_tmp   = conn()
+                        fid_row  = db_tmp.execute("SELECT fournisseur_id FROM livraisons WHERE id=?", (l['id'],)).fetchone()
+                        db_tmp.close()
+                        fourn_id_add = fid_row['fournisseur_id'] if fid_row else None
+                        with st.form(f"form_add_prod_{l['id']}"):
+                            nom_a = st.text_input("Nom du produit")
+                            col_la, col_qa = st.columns(2)
+                            with col_la: lot_a = st.text_input("N° de lot")
+                            with col_qa: qte_a = st.text_input("Quantite", placeholder="Ex: 5 kg")
+                            dlc_a = st.date_input("DLC", value=date.today())
+                            col_ta, col_ca = st.columns(2)
+                            with col_ta: temp_a = st.number_input("🌡️ Temp. (°C)", value=4.0, step=0.5)
+                            with col_ca: conf_a = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
+                            notes_a = st.text_area("Notes", placeholder="Aspect, odeur...")
+                            col_sa, col_xa = st.columns(2)
+                            with col_sa: do_add     = st.form_submit_button("💾 Ajouter",  use_container_width=True)
+                            with col_xa: do_cancel2 = st.form_submit_button("❌ Annuler", use_container_width=True)
+                            if do_add:
+                                if not nom_a.strip():
+                                    st.error("Nom obligatoire.")
+                                else:
+                                    db = conn()
+                                    db.execute(
+                                        "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?,?)",
+                                        (l['id'], fourn_id_add, nom_a.strip(), lot_a.strip() or None,
+                                         qte_a.strip() or None, dlc_a, temp_a, conf_a, notes_a or None)
+                                    )
+                                    db.commit(); db.close()
+                                    st.session_state.pop(add_key, None)
+                                    st.rerun()
+                            if do_cancel2:
+                                st.session_state.pop(add_key, None)
+                                st.rerun()
 
                     # Factures liees
                     factures = get_factures(l['id'])
