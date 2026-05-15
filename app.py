@@ -456,6 +456,12 @@ def supprimer_facture(facture_id):
     db.commit()
     db.close()
 
+def lier_facture_a_livraison(facture_id, livraison_id):
+    db = conn()
+    db.execute("UPDATE factures SET livraison_id=? WHERE id=?", (livraison_id, facture_id))
+    db.commit()
+    db.close()
+
 def get_config(cle, default=None):
     db = conn()
     row = db.execute("SELECT valeur FROM app_config WHERE cle=?", (cle,)).fetchone()
@@ -1341,8 +1347,18 @@ def page_factures():
                                   s in (f["date_email"]  or "").lower()]
 
         st.subheader(f"📎 {len(factures_filtrees)} / {len(factures_all)} facture(s) enregistree(s)")
+
+        # Liste des BLs pour le selecteur de lien
+        livraisons_lv = get_livraisons()
+        lv_labels_saved = ["-- Aucun --"]
+        lv_ids_saved    = [None]
+        for lv in livraisons_lv:
+            bl_txt = f" · BL {lv['numero_bl']}" if lv['numero_bl'] else ""
+            lv_labels_saved.append(f"{lv['nom_fourn']} — {lv['date_reception']}{bl_txt}")
+            lv_ids_saved.append(lv['id'])
+
         for f in factures_filtrees:
-            bl_label = f"BL {f['numero_bl'] or '#'+str(f['livraison_id'])} — {f['nom_fourn'] or '?'}" if f['livraison_id'] else "Non liee"
+            bl_label = f"BL {f['numero_bl'] or '#'+str(f['livraison_id'])} — {f['nom_fourn'] or '?'}" if f['livraison_id'] else "⚠️ Non liee"
             with st.expander(f"📄 {f['nom_fichier']}  •  {bl_label}"):
                 st.caption(f"De : {f['expediteur']}")
                 st.caption(f"Sujet : {f['sujet']}")
@@ -1361,6 +1377,16 @@ def page_factures():
                     if st.button("🗑️ Supprimer", key=f"del_{f['id']}", use_container_width=True):
                         supprimer_facture(f['id'])
                         st.rerun()
+
+                # Sélecteur de lien BL (toujours visible, pré-sélectionne le BL actuel)
+                cur_idx = lv_ids_saved.index(f['livraison_id']) if f['livraison_id'] in lv_ids_saved else 0
+                new_lv = st.selectbox("🔗 Lier a un BL", lv_labels_saved, index=cur_idx,
+                                      key=f"relink_sel_{f['id']}")
+                if st.button("💾 Mettre a jour le lien", key=f"relink_btn_{f['id']}", use_container_width=True):
+                    new_lid = lv_ids_saved[lv_labels_saved.index(new_lv)]
+                    lier_facture_a_livraison(f['id'], new_lid)
+                    st.success("✅ Lien mis a jour !")
+                    st.rerun()
         st.divider()
 
     # ── Synchronisation Gmail ────────────────────────────────────
