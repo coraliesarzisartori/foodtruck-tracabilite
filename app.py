@@ -231,21 +231,42 @@ def appeler_gpt_texte(prompt):
     except Exception as e:
         return {"erreur": str(e)}
 
+def pdf_premiere_page_en_image(pdf_bytes):
+    """Convertit la 1ere page d'un PDF en bytes JPEG (via pymupdf)."""
+    try:
+        import fitz  # pymupdf
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc[0]
+        mat  = fitz.Matrix(2, 2)  # zoom x2 pour meilleure qualite GPT
+        pix  = page.get_pixmap(matrix=mat)
+        img  = pix.tobytes("jpeg")
+        doc.close()
+        return img
+    except Exception as e:
+        return None
+
 def lire_bl_pdf(pdf_bytes):
-    """Lit un BL au format PDF : extrait le texte puis interroge GPT."""
+    """Lit un BL PDF : texte (PDF numerique) OU image 1ere page (PDF scanne)."""
+    # Essai 1 : extraction de texte (PDF numerique)
     texte = extraire_texte_pdf(pdf_bytes)
-    if not texte.strip():
-        return {"erreur": "PDF scanné ou texte non extractible — essaie une photo"}
-    prompt = (
-        f"Voici le texte extrait d'un bon de livraison alimentaire :\n\n{texte[:3000]}\n\n"
-        "Reponds UNIQUEMENT en JSON valide: "
-        "{\"fournisseur\": \"nom societe\", "
-        "\"numero_bl\": \"numero du bon de livraison (BL, N° BL, Bon N°, reference)\", "
-        "\"date\": \"date YYYY-MM-DD\", "
-        "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
-        "Si absent mets null."
-    )
-    return appeler_gpt_texte(prompt)
+    if texte.strip():
+        prompt = (
+            f"Voici le texte extrait d'un bon de livraison alimentaire :\n\n{texte[:3000]}\n\n"
+            "Reponds UNIQUEMENT en JSON valide: "
+            "{\"fournisseur\": \"nom societe\", "
+            "\"numero_bl\": \"numero du bon de livraison (BL, N° BL, Bon N°, reference)\", "
+            "\"date\": \"date YYYY-MM-DD\", "
+            "\"produits\": [{\"nom\": \"produit\", \"quantite\": \"qte\"}]} "
+            "Si absent mets null."
+        )
+        return appeler_gpt_texte(prompt)
+
+    # Essai 2 : PDF scanne — convertit la 1ere page en image → GPT vision
+    img_bytes = pdf_premiere_page_en_image(pdf_bytes)
+    if img_bytes:
+        return lire_bl(img_bytes)
+
+    return {"erreur": "Impossible de lire ce PDF (ni texte ni image extraits)"}
 
 def lire_etiquette(image_data):
     prompt = (
@@ -270,6 +291,25 @@ def lire_bl(image_data):
         "Si absent mets null."
     )
     return appeler_gpt(prompt, image_data)
+
+def lire_facture_pdf(pdf_bytes):
+    """Lit une facture PDF : texte (numerique) ou image 1ere page (scanne)."""
+    texte = extraire_texte_pdf(pdf_bytes)
+    if texte.strip():
+        prompt = (
+            f"Voici le texte extrait d'une facture fournisseur :\n\n{texte[:3000]}\n\n"
+            "Reponds UNIQUEMENT en JSON valide: "
+            "{\"numero_bl\": \"numero BL present (BL, N° BL, Ref BL, Bon de livraison)\", "
+            "\"numero_facture\": \"numero de facture (N° FA, Facture N°, FAC)\", "
+            "\"fournisseur\": \"nom fournisseur\", "
+            "\"date_facture\": \"date YYYY-MM-DD\"} "
+            "Si absent mets null."
+        )
+        return appeler_gpt_texte(prompt)
+    img_bytes = pdf_premiere_page_en_image(pdf_bytes)
+    if img_bytes:
+        return lire_facture_image(img_bytes)
+    return {"erreur": "Impossible de lire ce PDF"}
 
 def lire_facture_image(image_data):
     """Lit une facture (photo/scan) avec GPT et extrait N° BL, N° facture, fournisseur."""
@@ -862,13 +902,9 @@ def page_reception():
                 bl_est_pdf = bl_nom.lower().endswith(".pdf")
 
                 if bl_est_pdf:
-                    # Apercu PDF
-                    b64_bl = base64.b64encode(photo_bl.getvalue()).decode()
-                    st.markdown(
-                        f'<iframe src="data:application/pdf;base64,{b64_bl}" '
-                        f'width="100%" height="420px" style="border-radius:8px;border:1px solid #ddd;"></iframe>',
-                        unsafe_allow_html=True
-                    )
+                    st.info(f"📄 PDF chargé : **{bl_nom}**")
+                    st.download_button("👁️ Ouvrir / verifier le PDF", photo_bl.getvalue(),
+                                       bl_nom, "application/pdf", key="prev_bl_pdf")
                 else:
                     st.image(photo_bl, use_container_width=True)
 
@@ -936,7 +972,7 @@ def page_reception():
                             st.error(fac_lu.get("erreur","Erreur"))
 
                 if is_pdf_fac:
-                    # Extraction texte automatique du PDF (gratuit, sans GPT)
+                    # Extraction texte automatique (gratuit, sans GPT)
                     pdf_text = extraire_texte_pdf(facture_bytes)
                     if pdf_text:
                         bl_pdf = _extraire_numero_bl(pdf_text)
@@ -949,6 +985,26 @@ def page_reception():
                             if bl_pdf and not bl_data.get("numero_bl"):
                                 bl_data["numero_bl"] = bl_pdf
                                 st.session_state.bl_data = bl_data
+                    # Bouton IA (utile si PDF scanne ou texte non extrait)
+                    if AI_OK:
+                        if st.button("🤖 Lire la facture avec l'IA", key="btn_lire_fac_pdf"):
+                            with st.spinner("Lecture IA de la facture PDF..."):
+                                fac_lu = lire_facture_pdf(facture_bytes)
+                            if fac_lu and "erreur" not in fac_lu:
+                                parts = []
+                                if fac_lu.get("numero_bl"):      parts.append(f"N° BL : **{fac_lu['numero_bl']}**")
+                                if fac_lu.get("numero_facture"): parts.append(f"N° Facture : **{fac_lu['numero_facture']}**")
+                                if fac_lu.get("fournisseur"):    parts.append(f"Fournisseur : **{fac_lu['fournisseur']}**")
+                                st.info("📝 " + "  •  ".join(parts) if parts else "Rien detecte")
+                                updated = False
+                                if fac_lu.get("numero_bl") and not bl_data.get("numero_bl"):
+                                    bl_data["numero_bl"] = fac_lu["numero_bl"]; updated = True
+                                if fac_lu.get("fournisseur") and not bl_data.get("fournisseur"):
+                                    bl_data["fournisseur"] = fac_lu["fournisseur"]; updated = True
+                                if updated:
+                                    st.session_state.bl_data = bl_data; st.rerun()
+                            elif fac_lu:
+                                st.error(fac_lu.get("erreur","Erreur"))
 
             st.divider()
 
