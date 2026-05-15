@@ -229,6 +229,31 @@ def lire_bl(image_data):
     )
     return appeler_gpt(prompt, image_data)
 
+def lire_facture_image(image_data):
+    """Lit une facture (photo/scan) avec GPT et extrait N° BL, N° facture, fournisseur."""
+    prompt = (
+        "Analyse cette facture fournisseur alimentaire. "
+        "Reponds UNIQUEMENT en JSON valide: "
+        "{\"numero_bl\": \"numero BL present sur la facture (BL, N° BL, Ref BL, Bon de livraison, Reference livraison)\", "
+        "\"numero_facture\": \"numero de facture (N° FA, N° Facture, Facture N°, FAC)\", "
+        "\"fournisseur\": \"nom du fournisseur\", "
+        "\"date_facture\": \"date YYYY-MM-DD\"} "
+        "Si absent mets null."
+    )
+    return appeler_gpt(prompt, image_data)
+
+def extraire_texte_pdf(content_bytes):
+    """Extrait le texte brut d'un PDF numerique (pas les PDFs scannes)."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+        text = ""
+        for page in reader.pages[:5]:
+            text += (page.extract_text() or "") + "\n"
+        return text
+    except Exception:
+        return ""
+
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES — fonctions
 # ═══════════════════════════════════════════════════════════════
@@ -620,6 +645,21 @@ def fetch_factures_gmail(jours=30):
                     if not content:
                         continue
                     has_attachment = True
+
+                    # Pour les PDFs numeriques : extrait automatiquement N° BL et N° facture
+                    bl_detecte      = num_bl_email
+                    num_fac_detecte = _extraire_numero_facture(subject)
+                    if ext == "pdf":
+                        pdf_text = extraire_texte_pdf(content)
+                        if pdf_text:
+                            bl_pdf = _extraire_numero_bl(pdf_text)
+                            if bl_pdf and not bl_detecte:
+                                bl_detecte = bl_pdf
+                            nf = _extraire_numero_facture(pdf_text)
+                            if nf:
+                                num_fac_detecte = nf
+                    liv_id_final = _trouver_livraison(bl_detecte, fourn_id, livraisons) or livraison_id_auto
+
                     found.append({
                         "filename":         filename,
                         "content_b64":      base64.b64encode(content).decode("utf-8"),
@@ -631,9 +671,10 @@ def fetch_factures_gmail(jours=30):
                         "ext":              ext,
                         "fourn_id":         fourn_id,
                         "fourn_nom":        fourn_nom,
-                        "num_bl_email":     num_bl_email,
-                        "livraison_id_auto":livraison_id_auto,
+                        "num_bl_email":     bl_detecte,
+                        "livraison_id_auto":liv_id_final,
                         "lien":             None,
+                        "num_facture":      num_fac_detecte,
                     })
 
                 # Email sans PJ mais avec "facture" dans sujet → note le lien (telechargement separe)
@@ -808,6 +849,50 @@ def page_reception():
 
             if facture_bytes:
                 st.success(f"✅ Facture prete : {facture_name}")
+
+                # Lecture GPT pour les photos de facture
+                is_img_fac = facture_name and facture_name.lower().split(".")[-1] in ("jpg","jpeg","png")
+                # Pour les PDFs : extraction de texte automatique (sans GPT)
+                is_pdf_fac = facture_name and facture_name.lower().endswith(".pdf")
+
+                if is_img_fac and AI_OK:
+                    if st.button("🤖 Lire le N° BL sur la facture", key="btn_lire_fac_rec"):
+                        with st.spinner("Lecture de la facture..."):
+                            fac_lu = lire_facture_image(facture_bytes)
+                        if fac_lu and "erreur" not in fac_lu:
+                            parts = []
+                            if fac_lu.get("numero_bl"):       parts.append(f"N° BL : **{fac_lu['numero_bl']}**")
+                            if fac_lu.get("numero_facture"):  parts.append(f"N° Facture : **{fac_lu['numero_facture']}**")
+                            if fac_lu.get("fournisseur"):     parts.append(f"Fournisseur : **{fac_lu['fournisseur']}**")
+                            st.info("📝 " + "  •  ".join(parts) if parts else "Rien detecte sur la facture")
+                            # Mise a jour de bl_data si pas encore rempli
+                            updated = False
+                            if fac_lu.get("numero_bl") and not bl_data.get("numero_bl"):
+                                bl_data["numero_bl"] = fac_lu["numero_bl"]
+                                updated = True
+                            if fac_lu.get("fournisseur") and not bl_data.get("fournisseur"):
+                                bl_data["fournisseur"] = fac_lu["fournisseur"]
+                                updated = True
+                            if updated:
+                                st.session_state.bl_data = bl_data
+                                st.rerun()
+                        elif fac_lu:
+                            st.error(fac_lu.get("erreur","Erreur"))
+
+                if is_pdf_fac:
+                    # Extraction texte automatique du PDF (gratuit, sans GPT)
+                    pdf_text = extraire_texte_pdf(facture_bytes)
+                    if pdf_text:
+                        bl_pdf = _extraire_numero_bl(pdf_text)
+                        nf_pdf = _extraire_numero_facture(pdf_text)
+                        info_parts = []
+                        if bl_pdf:  info_parts.append(f"N° BL : **{bl_pdf}**")
+                        if nf_pdf:  info_parts.append(f"N° Facture : **{nf_pdf}**")
+                        if info_parts:
+                            st.info("📄 Lu dans le PDF — " + "  •  ".join(info_parts))
+                            if bl_pdf and not bl_data.get("numero_bl"):
+                                bl_data["numero_bl"] = bl_pdf
+                                st.session_state.bl_data = bl_data
 
             st.divider()
 
@@ -1253,6 +1338,41 @@ def page_factures():
                         st.rerun()
                     else:
                         st.error(f"Erreur : {err}")
+
+            # Bouton lecture facture image avec GPT (images uniquement)
+            if f.get("ext") in ("jpg", "jpeg", "png") and AI_OK:
+                if st.button("🤖 Lire N° BL sur cette facture", key=f"read_fac_{i}", use_container_width=True):
+                    with st.spinner("Lecture GPT de la facture..."):
+                        fac_bytes = base64.b64decode(f["content_b64"])
+                        fac_data  = lire_facture_image(fac_bytes)
+                    if fac_data and "erreur" not in fac_data:
+                        detected_bl  = fac_data.get("numero_bl")
+                        detected_nf  = fac_data.get("numero_facture")
+                        detected_fou = fac_data.get("fournisseur")
+                        msg_parts = []
+                        if detected_bl:  msg_parts.append(f"N° BL : **{detected_bl}**")
+                        if detected_nf:  msg_parts.append(f"N° Facture : **{detected_nf}**")
+                        if detected_fou: msg_parts.append(f"Fournisseur : **{detected_fou}**")
+                        st.success("✅ " + "  •  ".join(msg_parts) if msg_parts else "Rien detecte")
+                        if detected_bl:
+                            # Met a jour l'entree dans la liste et relance pour re-matcher le BL
+                            idx_f = next((k for k, x in enumerate(found) if x is f), -1)
+                            if idx_f >= 0:
+                                found[idx_f]["num_bl_email"] = detected_bl
+                                if detected_nf: found[idx_f]["num_facture"] = detected_nf
+                                # Re-cherche le BL correspondant
+                                for lv in livraisons:
+                                    if lv.get("numero_bl") and detected_bl.lower() in lv["numero_bl"].lower():
+                                        found[idx_f]["livraison_id_auto"] = lv["id"]
+                                        break
+                                st.session_state.factures_found = found
+                                st.rerun()
+                    elif fac_data:
+                        st.error(f"Erreur GPT : {fac_data.get('erreur')}")
+
+            # Indicateur si BL detecte depuis le PDF (extraction automatique)
+            if f.get("ext") == "pdf" and f.get("num_bl_email"):
+                st.info(f"📄 N° BL detecte dans le PDF : **{f['num_bl_email']}**")
 
             # Pre-selection automatique du BL
             default_idx = 0
