@@ -116,6 +116,10 @@ def init_db():
             created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (livraison_id) REFERENCES livraisons(id)
         );
+        CREATE TABLE IF NOT EXISTS app_config (
+            cle    TEXT PRIMARY KEY,
+            valeur TEXT
+        );
     """)
     db.commit()
     # Migrations colonnes
@@ -343,6 +347,31 @@ def supprimer_facture(facture_id):
     db.commit()
     db.close()
 
+def get_config(cle, default=None):
+    db = conn()
+    row = db.execute("SELECT valeur FROM app_config WHERE cle=?", (cle,)).fetchone()
+    db.close()
+    return row["valeur"] if row else default
+
+def set_config(cle, valeur):
+    db = conn()
+    db.execute(
+        "INSERT INTO app_config (cle, valeur) VALUES (?,?) "
+        "ON CONFLICT(cle) DO UPDATE SET valeur=excluded.valeur",
+        (cle, valeur)
+    )
+    db.commit()
+    db.close()
+
+def supprimer_livraison(livraison_id):
+    """Supprime une livraison et tous ses produits/factures associes."""
+    db = conn()
+    db.execute("DELETE FROM produits  WHERE livraison_id=?", (livraison_id,))
+    db.execute("DELETE FROM factures  WHERE livraison_id=?", (livraison_id,))
+    db.execute("DELETE FROM livraisons WHERE id=?",          (livraison_id,))
+    db.commit()
+    db.close()
+
 # ═══════════════════════════════════════════════════════════════
 #  PROGINOV — telechargement automatique
 # ═══════════════════════════════════════════════════════════════
@@ -537,6 +566,11 @@ def fetch_factures_gmail(jours=30):
         fournisseurs    = get_fournisseurs()
         livraisons      = get_livraisons()
         keywords_invoice = ["facture", "invoice", "bon de livraison", "bl ", "commande", "livraison", "avoir"]
+
+        # Mots-cles fournisseurs pour filtrer (configurable depuis Config)
+        kw_raw = get_config("gmail_keywords", "sysco,gda,relais d'or,krill")
+        keywords_fourn_filter = [k.strip().lower() for k in kw_raw.split(",") if k.strip()]
+
         found = []
 
         for eid in ids[-500:]:
@@ -551,7 +585,12 @@ def fetch_factures_gmail(jours=30):
                 sender   = _decode_str(msg.get("From", ""))
                 date_str = msg.get("Date", "")
 
-                text_low   = (subject + " " + sender).lower()
+                text_low = (subject + " " + sender).lower()
+
+                # Filtre : garde uniquement les emails des fournisseurs voulus
+                if keywords_fourn_filter and not any(kw in text_low for kw in keywords_fourn_filter):
+                    continue
+
                 is_invoice = any(k in text_low for k in keywords_invoice)
 
                 # Detection automatique fournisseur
@@ -699,6 +738,26 @@ def page_reception():
                             )
                     else:
                         st.caption("Aucune facture liee — va dans l'onglet Factures pour en ajouter.")
+
+                    # Bouton suppression avec confirmation
+                    st.divider()
+                    del_key = f"confirm_del_liv_{l['id']}"
+                    if not st.session_state.get(del_key):
+                        if st.button("🗑️ Supprimer ce BL", key=f"del_liv_{l['id']}", use_container_width=True):
+                            st.session_state[del_key] = True
+                            st.rerun()
+                    else:
+                        st.warning("⚠️ Supprimer definitivement ce BL, ses produits et ses factures ?")
+                        col_y, col_n = st.columns(2)
+                        with col_y:
+                            if st.button("✅ Oui, supprimer", key=f"yes_del_{l['id']}", use_container_width=True):
+                                supprimer_livraison(l['id'])
+                                st.session_state.pop(del_key, None)
+                                st.rerun()
+                        with col_n:
+                            if st.button("❌ Annuler", key=f"no_del_{l['id']}", use_container_width=True):
+                                st.session_state.pop(del_key, None)
+                                st.rerun()
 
     with onglet_rec:
         step = st.session_state.get("rec_step", 1)
@@ -1033,12 +1092,45 @@ def page_factures():
         st.info("Va dans l'onglet **Config** → section Email pour voir les instructions.")
         return
 
+    # ── Auto-sync au premier chargement de la session ───────────
+    if not st.session_state.get("factures_auto_synced"):
+        st.session_state.factures_auto_synced = True
+        with st.spinner("🔄 Synchronisation automatique Gmail..."):
+            try:
+                result_auto = fetch_factures_gmail(30)
+                if isinstance(result_auto, list) and result_auto:
+                    # On ne garde que les nouvelles (pas deja enregistrees)
+                    deja = {(fac["nom_fichier"], fac["sujet"]) for fac in get_factures()}
+                    nouveaux = [r for r in result_auto
+                                if (r["filename"], r["subject"]) not in deja]
+                    if nouveaux:
+                        st.session_state.factures_found = nouveaux
+            except Exception:
+                pass  # Echec silencieux sur auto-sync
+
     # ── Factures deja enregistrees ──────────────────────────────
-    factures = get_factures()
-    if factures:
-        st.subheader(f"📎 {len(factures)} facture(s) enregistree(s)")
-        for f in factures:
-            bl_label = f"BL #{f['livraison_id']} — {f['nom_fourn'] or '?'}" if f['livraison_id'] else "Non liee"
+    factures_all = get_factures()
+
+    # Barre de recherche
+    search = st.text_input("🔍 Rechercher une facture",
+                           placeholder="Fournisseur, N° facture, sujet, date...",
+                           key="fac_search")
+
+    if factures_all:
+        factures_filtrees = factures_all
+        if search:
+            s = search.lower()
+            factures_filtrees = [f for f in factures_all if
+                                  s in (f["nom_fichier"] or "").lower() or
+                                  s in (f["expediteur"]  or "").lower() or
+                                  s in (f["sujet"]       or "").lower() or
+                                  s in (f["nom_fourn"]   or "").lower() or
+                                  s in (f["numero_bl"]   or "").lower() or
+                                  s in (f["date_email"]  or "").lower()]
+
+        st.subheader(f"📎 {len(factures_filtrees)} / {len(factures_all)} facture(s) enregistree(s)")
+        for f in factures_filtrees:
+            bl_label = f"BL {f['numero_bl'] or '#'+str(f['livraison_id'])} — {f['nom_fourn'] or '?'}" if f['livraison_id'] else "Non liee"
             with st.expander(f"📄 {f['nom_fichier']}  •  {bl_label}"):
                 st.caption(f"De : {f['expediteur']}")
                 st.caption(f"Sujet : {f['sujet']}")
@@ -1065,7 +1157,7 @@ def page_factures():
     with col1:
         jours = st.slider("Chercher dans les derniers X jours", 7, 365, 30, key="fac_jours")
     with col2:
-        sync = st.button("🔄 Lancer", use_container_width=True, key="btn_sync")
+        sync = st.button("🔄 Actualiser", use_container_width=True, key="btn_sync")
 
     if sync:
         with st.spinner("Connexion a Gmail en cours..."):
@@ -1228,6 +1320,19 @@ PROGINOV_LOGIN = "ton_identifiant_proginov"
 PROGINOV_PASSWORD = "ton_mot_de_passe_proginov"
 ```
         """)
+
+    st.divider()
+    st.subheader("📬 Filtrage emails Gmail")
+    kw_actuel = get_config("gmail_keywords", "sysco,gda,relais d'or,krill")
+    st.caption("Mots-cles fournisseurs (separes par virgule) — seuls les emails contenant l'un de ces mots seront synchronises.")
+    with st.form("form_kw_gmail"):
+        new_kw = st.text_input("Mots-cles", value=kw_actuel,
+                               placeholder="sysco,gda,relais d'or,krill")
+        if st.form_submit_button("💾 Sauvegarder les filtres"):
+            set_config("gmail_keywords", new_kw.strip())
+            # Remet a zero l'auto-sync pour qu'il se relance avec les nouveaux filtres
+            st.session_state.pop("factures_auto_synced", None)
+            st.success("✅ Filtres mis a jour ! La prochaine synchro utilisera ces mots-cles.")
 
     st.divider()
     st.subheader("📧 Email (Factures Gmail)")
