@@ -121,6 +121,13 @@ def init_db():
             cle    TEXT PRIMARY KEY,
             valeur TEXT
         );
+        CREATE TABLE IF NOT EXISTS plats (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom        TEXT NOT NULL UNIQUE,
+            dlc_jours  INTEGER DEFAULT 3,
+            notes      TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     db.commit()
     # Migrations colonnes
@@ -133,6 +140,9 @@ def init_db():
         "ALTER TABLE livraisons ADD COLUMN photo_bl_b64 TEXT",
         "ALTER TABLE livraisons ADD COLUMN photo_bl_ext TEXT",
         "ALTER TABLE produits ADD COLUMN photo_etiquette_b64 TEXT",
+        "ALTER TABLE preparations ADD COLUMN plat_id INTEGER",
+        "ALTER TABLE preparations ADD COLUMN dlc_prep DATE",
+        "ALTER TABLE preparations ADD COLUMN nom_plat TEXT",
     ]:
         try:
             db.execute(migration)
@@ -390,7 +400,8 @@ def rechercher_lot(numero_lot):
             p.id, p.nom, p.numero_lot, p.dlc, p.created_at,
             f.nom AS fourn,
             l.numero_bl, l.date_reception, l.temperature, l.conformite,
-            prep.id AS prep_id, prep.date_prep, prep.heure_prep, prep.notes AS prep_notes
+            prep.id AS prep_id, prep.date_prep, prep.heure_prep,
+            prep.notes AS prep_notes, prep.dlc_prep, prep.nom_plat
         FROM produits p
         JOIN fournisseurs f ON p.fournisseur_id = f.id
         LEFT JOIN livraisons l ON p.livraison_id = l.id
@@ -490,6 +501,63 @@ def supprimer_facture(facture_id):
     db.execute("DELETE FROM factures WHERE id = ?", (facture_id,))
     db.commit()
     db.close()
+
+# ── Plats ────────────────────────────────────────────────────────
+def get_plats():
+    db = conn()
+    rows = db.execute("SELECT * FROM plats ORDER BY nom").fetchall()
+    db.close()
+    return rows
+
+def ajouter_plat(nom, dlc_jours, notes=""):
+    try:
+        db = conn()
+        db.execute("INSERT INTO plats (nom, dlc_jours, notes) VALUES (?,?,?)",
+                   (nom.strip(), int(dlc_jours), notes.strip() or None))
+        db.commit(); db.close()
+        return True
+    except Exception:
+        return False
+
+def modifier_plat(plat_id, nom, dlc_jours, notes):
+    db = conn()
+    db.execute("UPDATE plats SET nom=?, dlc_jours=?, notes=? WHERE id=?",
+               (nom.strip(), int(dlc_jours), notes.strip() or None, plat_id))
+    db.commit(); db.close()
+
+def supprimer_plat(plat_id):
+    db = conn()
+    db.execute("DELETE FROM plats WHERE id=?", (plat_id,))
+    db.commit(); db.close()
+
+# ── Préparations ─────────────────────────────────────────────────
+def get_preparations():
+    db = conn()
+    rows = db.execute("""
+        SELECT prep.*, pl.nom AS plat_nom_fiche, pl.dlc_jours,
+               COUNT(pp.produit_id) AS nb_produits
+        FROM preparations prep
+        LEFT JOIN plats pl ON prep.plat_id = pl.id
+        LEFT JOIN preparation_produits pp ON prep.id = pp.preparation_id
+        GROUP BY prep.id
+        ORDER BY prep.date_prep DESC, prep.heure_prep DESC
+    """).fetchall()
+    db.close()
+    return rows
+
+def get_produits_preparation(preparation_id):
+    db = conn()
+    rows = db.execute("""
+        SELECT p.nom, p.numero_lot, p.dlc, f.nom AS nom_fourn, l.numero_bl
+        FROM preparation_produits pp
+        JOIN produits p  ON pp.produit_id      = p.id
+        JOIN fournisseurs f ON p.fournisseur_id = f.id
+        LEFT JOIN livraisons l ON p.livraison_id = l.id
+        WHERE pp.preparation_id = ?
+        ORDER BY p.nom
+    """, (preparation_id,)).fetchall()
+    db.close()
+    return rows
 
 def lier_facture_a_livraison(facture_id, livraison_id):
     db = conn()
@@ -1386,46 +1454,126 @@ def page_reception():
 #  PAGE : PREPARATION
 # ═══════════════════════════════════════════════════════════════
 def page_preparation():
-    st.header("👨‍🍳 Nouvelle preparation")
+    st.header("👨‍🍳 Préparations")
 
-    fournisseurs = get_fournisseurs()
-    if not fournisseurs:
-        st.info("Fais d'abord une reception !")
-        return
+    tab_new, tab_histo = st.tabs(["➕ Nouvelle préparation", "📋 Historique"])
 
-    options = ["Tous"] + [f["nom"] for f in fournisseurs]
-    filtre  = st.selectbox("Filtrer par fournisseur", options)
-    produits = get_produits() if filtre == "Tous" else get_produits(
-        next(f["id"] for f in fournisseurs if f["nom"] == filtre))
+    # ══════════════════════════════════════════════════════════════
+    with tab_new:
+        plats = get_plats()
 
-    if not produits:
-        st.info("Aucun produit — fais d'abord une reception !")
-        return
+        if not plats:
+            st.info("💡 Aucune fiche plat — va dans **⚙️ Config** → *Fiches plats* pour créer tes plats et leur DLC.")
 
-    st.subheader("Coche les produits utilises")
-    selectionnes = []
-    for p in produits:
-        lot = f"LOT: {p['numero_lot']}" if p['numero_lot'] else "Pas de lot"
-        dlc = f"DLC: {p['dlc']}"        if p['dlc']        else "Pas de DLC"
-        if st.checkbox(f"{p['nom']}  —  {lot}  —  {dlc}", key=f"pp_{p['id']}"):
-            selectionnes.append(p["id"])
+        # ── 1. Choix du plat ─────────────────────────────────────
+        st.markdown("**🍽️ Quel plat tu prépares ?**")
+        if plats:
+            plat_noms = ["✏️ Plat personnalisé (non listé)"] + [f"🍽️ {pl['nom']}  ·  DLC {pl['dlc_jours']}j" for pl in plats]
+            plat_sel_label = st.selectbox("Choisir un plat", plat_noms, key="prep_plat_sel")
+            plat_idx = plat_noms.index(plat_sel_label) - 1  # -1 = personnalisé
+            plat_obj = plats[plat_idx] if plat_idx >= 0 else None
+        else:
+            plat_obj = None
 
-    if selectionnes:
+        if plat_obj:
+            nom_prep = plat_obj["nom"]
+            st.success(f"✅ **{nom_prep}** sélectionné")
+            if plat_obj["notes"]:
+                st.caption(plat_obj["notes"])
+        else:
+            nom_prep = st.text_input("Nom du plat", placeholder="Ex : Sauce tomate maison, Poulet mariné...")
+
+        # ── 2. DLC automatique ───────────────────────────────────
+        st.markdown("**📅 DLC de la préparation**")
+        if plat_obj and plat_obj["dlc_jours"]:
+            dlc_auto = date.today() + timedelta(days=int(plat_obj["dlc_jours"]))
+            st.info(f"📅 DLC calculée automatiquement : **{dlc_auto.strftime('%d/%m/%Y')}**  _(+{plat_obj['dlc_jours']} jours)_")
+        else:
+            dlc_auto = date.today() + timedelta(days=3)
+        dlc_prep = st.date_input("DLC (modifiable)", value=dlc_auto, key="prep_dlc")
+
         st.divider()
+
+        # ── 3. Produits utilisés ──────────────────────────────────
+        st.markdown("**📦 Produits utilisés (coche ce que tu as mis)**")
+        fournisseurs = get_fournisseurs()
+        if fournisseurs:
+            fourn_opts = ["Tous les fournisseurs"] + [f["nom"] for f in fournisseurs]
+            filtre = st.selectbox("Filtrer par fournisseur", fourn_opts, key="prep_fourn_filter")
+            produits = get_produits() if filtre == "Tous les fournisseurs" else get_produits(
+                next(f["id"] for f in fournisseurs if f["nom"] == filtre))
+        else:
+            produits = get_produits()
+
+        selectionnes = []
+        if produits:
+            for p in produits:
+                lot_txt  = f"LOT {p['numero_lot']}" if p['numero_lot'] else "—"
+                dlc_txt  = f"DLC {p['dlc']}"        if p['dlc']        else "—"
+                fourn_txt = p['fourn'] if 'fourn' in p.keys() else ""
+                label = f"**{p['nom']}**  ·  {lot_txt}  ·  {dlc_txt}  ·  _{fourn_txt}_"
+                if st.checkbox(label, key=f"pp_{p['id']}"):
+                    selectionnes.append(p["id"])
+            if selectionnes:
+                st.success(f"✅ {len(selectionnes)} produit(s) sélectionné(s)")
+        else:
+            st.info("Aucun produit reçu — fais d'abord une réception !")
+
+        st.divider()
+
+        # ── 4. Enregistrement ─────────────────────────────────────
         with st.form("form_prep"):
-            d = st.date_input("Date", value=date.today())
-            h = st.time_input("Heure", value=datetime.now().time())
-            n = st.text_area("Notes", placeholder="Description...")
-            if st.form_submit_button("✅ Enregistrer"):
-                db = conn()
-                cur = db.execute("INSERT INTO preparations (date_prep,heure_prep,notes) VALUES (?,?,?)",
-                                  (d, str(h)[:5], n))
-                for pid in selectionnes:
-                    db.execute("INSERT INTO preparation_produits (preparation_id,produit_id) VALUES (?,?)",
-                                (cur.lastrowid, pid))
-                db.commit(); db.close()
-                st.success(f"✅ Preparation enregistree avec {len(selectionnes)} produit(s) !")
-                st.rerun()
+            col_d, col_h = st.columns(2)
+            with col_d: d = st.date_input("Date de prépa", value=date.today())
+            with col_h: h = st.time_input("Heure", value=datetime.now().time())
+            n = st.text_area("Notes", placeholder="Quantité produite, observations...")
+            if st.form_submit_button("✅ Enregistrer la préparation", use_container_width=True):
+                if not nom_prep.strip():
+                    st.error("⚠️ Indique le nom du plat.")
+                else:
+                    plat_id_save = plat_obj["id"] if plat_obj else None
+                    db = conn()
+                    cur = db.execute(
+                        "INSERT INTO preparations (date_prep,heure_prep,notes,plat_id,dlc_prep,nom_plat) VALUES (?,?,?,?,?,?)",
+                        (d, str(h)[:5], n or None, plat_id_save, dlc_prep, nom_prep.strip())
+                    )
+                    prep_id = cur.lastrowid
+                    for pid in selectionnes:
+                        db.execute("INSERT INTO preparation_produits (preparation_id,produit_id) VALUES (?,?)",
+                                   (prep_id, pid))
+                    db.commit(); db.close()
+                    st.success(f"✅ **{nom_prep}** enregistré !  DLC : **{dlc_prep.strftime('%d/%m/%Y')}**  ·  {len(selectionnes)} produit(s)")
+                    st.rerun()
+
+    # ══════════════════════════════════════════════════════════════
+    with tab_histo:
+        preps = get_preparations()
+        if not preps:
+            st.info("Aucune préparation enregistrée pour l'instant.")
+        else:
+            st.write(f"**{len(preps)} préparation(s) enregistrée(s)**")
+            for pr in preps:
+                nom_affiché = pr["nom_plat"] or pr["plat_nom_fiche"] if "plat_nom_fiche" in pr.keys() else pr["nom_plat"] or "—"
+                dlc_affiché = pr["dlc_prep"] or "—"
+                nb_prod = pr["nb_produits"] if "nb_produits" in pr.keys() else 0
+                with st.container():
+                    st.markdown(f"""<div class="card">
+                        <strong>🍽️ {nom_affiché}</strong>
+                        &nbsp;&nbsp;<span class="badge-dlc">📅 DLC {dlc_affiché}</span>
+                        &nbsp;&nbsp;<small>🗓️ {pr['date_prep']} à {pr['heure_prep']}</small>
+                        &nbsp;&nbsp;<small>📦 {nb_prod} produit(s)</small>
+                        {f'<br><small><i>{pr["notes"]}</i></small>' if pr["notes"] else ""}
+                    </div>""", unsafe_allow_html=True)
+
+                    # Produits utilisés
+                    produits_prep = get_produits_preparation(pr["id"])
+                    if produits_prep:
+                        for pp in produits_prep:
+                            lot_pp = f"LOT {pp['numero_lot']}" if pp['numero_lot'] else "—"
+                            dlc_pp = f"DLC {pp['dlc']}"        if pp['dlc']        else "—"
+                            bl_pp  = f"BL {pp['numero_bl']}"   if pp['numero_bl']  else ""
+                            st.caption(f"  • {pp['nom']}  ·  {lot_pp}  ·  {dlc_pp}  ·  {pp['nom_fourn']} {bl_pp}")
+                    st.divider()
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE : TRACABILITE
@@ -1458,12 +1606,16 @@ def page_tracabilite():
                             if r['temperature'] is not None:
                                 st.write(f"Temperature : {r['temperature']}°C")
                             st.write(f"Conformite : {r['conformite'] or '—'}")
-                        st.markdown("**Preparation**")
+                        st.markdown("**Préparation**")
                         if r['date_prep']:
-                            st.success(f"✅ Prepare le {r['date_prep']} a {r['heure_prep']}")
+                            nom_plat_tr = r["nom_plat"] if "nom_plat" in r.keys() else None
+                            dlc_prep_tr = r["dlc_prep"] if "dlc_prep" in r.keys() else None
+                            st.success(f"✅ Préparé le {r['date_prep']} à {r['heure_prep']}"
+                                       + (f"  ·  **{nom_plat_tr}**" if nom_plat_tr else "")
+                                       + (f"  ·  DLC {dlc_prep_tr}" if dlc_prep_tr else ""))
                             if r['prep_notes']: st.write(f"Notes : {r['prep_notes']}")
                         else:
-                            st.info("Pas encore utilise en preparation.")
+                            st.info("Pas encore utilisé en préparation.")
 
     with tab2:
         fournisseurs = get_fournisseurs()
@@ -1735,6 +1887,62 @@ def page_factures():
 def page_config():
     st.header("⚙️ Configuration")
 
+    # ── Fiches Plats ─────────────────────────────────────────────
+    st.subheader("🍽️ Fiches Plats")
+    st.caption("Définis tes plats et leur DLC en jours — ils apparaîtront dans la page Préparation.")
+
+    plats = get_plats()
+    if plats:
+        for pl in plats:
+            edit_plat_key = f"edit_plat_{pl['id']}"
+            if not st.session_state.get(edit_plat_key):
+                col_a, col_b, col_c = st.columns([4, 1, 1])
+                with col_a:
+                    st.write(f"**{pl['nom']}** — DLC {pl['dlc_jours']} jour(s)"
+                             + (f" — _{pl['notes']}_" if pl['notes'] else ""))
+                with col_b:
+                    if st.button("✏️", key=f"btn_edit_plat_{pl['id']}", use_container_width=True):
+                        st.session_state[edit_plat_key] = True
+                        st.rerun()
+                with col_c:
+                    if st.button("🗑️", key=f"btn_del_plat_{pl['id']}", use_container_width=True):
+                        supprimer_plat(pl['id'])
+                        st.rerun()
+            else:
+                with st.form(f"form_edit_plat_{pl['id']}"):
+                    nom_ep   = st.text_input("Nom", value=pl['nom'])
+                    dlc_ep   = st.number_input("DLC (jours)", value=int(pl['dlc_jours']), min_value=1, max_value=365)
+                    notes_ep = st.text_input("Notes", value=pl['notes'] or "")
+                    c1, c2   = st.columns(2)
+                    with c1: save_pl   = st.form_submit_button("💾 Sauvegarder", use_container_width=True)
+                    with c2: cancel_pl = st.form_submit_button("❌ Annuler",      use_container_width=True)
+                    if save_pl:
+                        modifier_plat(pl['id'], nom_ep, dlc_ep, notes_ep)
+                        st.session_state.pop(edit_plat_key, None)
+                        st.rerun()
+                    if cancel_pl:
+                        st.session_state.pop(edit_plat_key, None)
+                        st.rerun()
+    else:
+        st.info("Aucun plat défini pour l'instant.")
+
+    with st.form("form_add_plat"):
+        st.markdown("**➕ Ajouter un plat**")
+        col_n, col_d = st.columns([3, 1])
+        with col_n: nom_p   = st.text_input("Nom du plat", placeholder="Ex : Sauce tomate maison")
+        with col_d: dlc_p   = st.number_input("DLC (jours)", value=3, min_value=1, max_value=365)
+        notes_p = st.text_input("Notes (optionnel)", placeholder="Ex : À conserver au frais")
+        if st.form_submit_button("➕ Ajouter", use_container_width=True):
+            if nom_p.strip():
+                if ajouter_plat(nom_p, dlc_p, notes_p):
+                    st.success(f"✅ **{nom_p}** ajouté — DLC {dlc_p} jours !")
+                    st.rerun()
+                else:
+                    st.error("Ce plat existe déjà.")
+            else:
+                st.error("Nom obligatoire.")
+
+    st.divider()
     st.subheader("Fournisseurs")
     for f in get_fournisseurs():
         st.write(f"• {f['nom']}")
