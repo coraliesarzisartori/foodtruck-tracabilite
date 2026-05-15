@@ -130,6 +130,9 @@ def init_db():
         "ALTER TABLE produits ADD COLUMN conformite TEXT DEFAULT 'conforme'",
         "ALTER TABLE produits ADD COLUMN notes TEXT",
         "ALTER TABLE produits ADD COLUMN quantite TEXT",
+        "ALTER TABLE livraisons ADD COLUMN photo_bl_b64 TEXT",
+        "ALTER TABLE livraisons ADD COLUMN photo_bl_ext TEXT",
+        "ALTER TABLE produits ADD COLUMN photo_etiquette_b64 TEXT",
     ]:
         try:
             db.execute(migration)
@@ -403,6 +406,7 @@ def get_livraisons():
     db = conn()
     rows = db.execute("""
         SELECT l.id, l.numero_bl, l.date_reception, l.temperature, l.conformite, l.notes,
+               l.photo_bl_b64, l.photo_bl_ext,
                f.nom AS nom_fourn
         FROM livraisons l
         JOIN fournisseurs f ON l.fournisseur_id = f.id
@@ -419,13 +423,27 @@ def get_produits_livraison(livraison_id):
     db.close()
     return rows
 
-def modifier_produit(produit_id, nom, lot, quantite, dlc, temperature, conformite, notes):
+def modifier_produit(produit_id, nom, lot, quantite, dlc, temperature, conformite, notes, photo_b64=None):
     db = conn()
-    db.execute("""
-        UPDATE produits
-        SET nom=?, numero_lot=?, quantite=?, dlc=?, temperature=?, conformite=?, notes=?
-        WHERE id=?
-    """, (nom, lot or None, quantite or None, str(dlc), temperature, conformite, notes or None, produit_id))
+    if photo_b64 is not None:
+        db.execute("""
+            UPDATE produits
+            SET nom=?, numero_lot=?, quantite=?, dlc=?, temperature=?, conformite=?, notes=?, photo_etiquette_b64=?
+            WHERE id=?
+        """, (nom, lot or None, quantite or None, str(dlc), temperature, conformite, notes or None, photo_b64, produit_id))
+    else:
+        db.execute("""
+            UPDATE produits
+            SET nom=?, numero_lot=?, quantite=?, dlc=?, temperature=?, conformite=?, notes=?
+            WHERE id=?
+        """, (nom, lot or None, quantite or None, str(dlc), temperature, conformite, notes or None, produit_id))
+    db.commit()
+    db.close()
+
+def maj_photo_bl(livraison_id, photo_b64, photo_ext):
+    db = conn()
+    db.execute("UPDATE livraisons SET photo_bl_b64=?, photo_bl_ext=? WHERE id=?",
+               (photo_b64, photo_ext, livraison_id))
     db.commit()
     db.close()
 
@@ -852,6 +870,32 @@ def page_reception():
                         if l['notes']:
                             st.write(f"**Notes :** {l['notes']}")
 
+                    # Photo BL
+                    _bl_b64 = l["photo_bl_b64"] if "photo_bl_b64" in l.keys() else None
+                    _bl_ext = l["photo_bl_ext"] if "photo_bl_ext" in l.keys() else "jpg"
+                    st.markdown("**🖼️ Photo du BL**")
+                    if _bl_b64:
+                        if _bl_ext == "pdf":
+                            st.download_button("📄 Télécharger le BL (PDF)", base64.b64decode(_bl_b64),
+                                               f"bl_{l['numero_bl'] or l['id']}.pdf", "application/pdf",
+                                               key=f"dl_bl_histo_{l['id']}")
+                        else:
+                            st.image(base64.b64decode(_bl_b64), use_container_width=True)
+                    new_bl_photo = st.file_uploader(
+                        "📷 Ajouter / remplacer la photo BL" if not _bl_b64 else "📷 Remplacer la photo BL",
+                        type=["jpg","jpeg","png","pdf"], key=f"up_bl_histo_{l['id']}"
+                    )
+                    if new_bl_photo:
+                        _ext_new = "pdf" if new_bl_photo.name.lower().endswith(".pdf") else "jpg"
+                        if _ext_new != "pdf":
+                            st.image(new_bl_photo, use_container_width=True)
+                        if st.button("💾 Sauvegarder photo BL", key=f"save_bl_photo_{l['id']}", use_container_width=True):
+                            _new_b64 = base64.b64encode(new_bl_photo.getvalue()).decode()
+                            maj_photo_bl(l['id'], _new_b64, _ext_new)
+                            st.success("✅ Photo BL mise à jour !")
+                            st.rerun()
+                    st.divider()
+
                     produits = get_produits_livraison(l['id'])
                     st.markdown(f"**{len(produits)} produit(s) :**" if produits else "**Produits :**")
                     for p in produits:
@@ -864,6 +908,7 @@ def page_reception():
                         qte_badge = f'<span class="badge-qte">📦 {_qte}</span>&nbsp;' if _qte else ""
                         edit_key  = f"edit_prod_{p['id']}"
 
+                        _etiq_b64 = p["photo_etiquette_b64"] if "photo_etiquette_b64" in p.keys() else None
                         if not st.session_state.get(edit_key):
                             st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
                                 <strong>{p['nom']}</strong><br>
@@ -874,6 +919,8 @@ def page_reception():
                                 <small> {conf_icon} {conf_val}</small>
                                 {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
                             </div>""", unsafe_allow_html=True)
+                            if _etiq_b64:
+                                st.image(base64.b64decode(_etiq_b64), width=120, caption="Étiquette")
                             col_e, col_d = st.columns(2)
                             with col_e:
                                 if st.button("✏️ Modifier", key=f"btn_edit_{p['id']}", use_container_width=True):
@@ -890,6 +937,18 @@ def page_reception():
                             if p['dlc']:
                                 try: dlc_edit_default = datetime.strptime(str(p['dlc']), "%Y-%m-%d").date()
                                 except: pass
+                            # Photo hors form (camera_input ne fonctionne pas dans un form)
+                            photo_edit_key = f"photo_edit_{p['id']}"
+                            if _etiq_b64:
+                                st.caption("📸 Photo actuelle :")
+                                st.image(base64.b64decode(_etiq_b64), width=150)
+                            new_photo_e = st.file_uploader(
+                                "📷 Changer la photo étiquette (optionnel)",
+                                type=["jpg","jpeg","png"], key=f"up_edit_et_{p['id']}"
+                            )
+                            if new_photo_e:
+                                st.image(new_photo_e, width=150, caption="Nouvelle photo")
+                                st.session_state[photo_edit_key] = new_photo_e.getvalue()
                             with st.form(f"form_edit_prod_{p['id']}"):
                                 nom_e = st.text_input("Nom", value=p['nom'])
                                 col_le, col_qe = st.columns(2)
@@ -907,11 +966,17 @@ def page_reception():
                                 with col_sv: do_save   = st.form_submit_button("💾 Sauvegarder", use_container_width=True)
                                 with col_cx: do_cancel = st.form_submit_button("❌ Annuler",      use_container_width=True)
                                 if do_save:
-                                    modifier_produit(p['id'], nom_e.strip(), lot_e.strip(), qte_e.strip(), dlc_e, temp_e, conf_e, notes_e)
+                                    # Recupere la nouvelle photo si chargee
+                                    new_b64 = None
+                                    if st.session_state.get(photo_edit_key):
+                                        new_b64 = base64.b64encode(st.session_state[photo_edit_key]).decode()
+                                    modifier_produit(p['id'], nom_e.strip(), lot_e.strip(), qte_e.strip(), dlc_e, temp_e, conf_e, notes_e, new_b64)
                                     st.session_state.pop(edit_key, None)
+                                    st.session_state.pop(photo_edit_key, None)
                                     st.rerun()
                                 if do_cancel:
                                     st.session_state.pop(edit_key, None)
+                                    st.session_state.pop(photo_edit_key, None)
                                     st.rerun()
 
                     # ── Ajouter un produit à ce BL ─────────────────
@@ -926,6 +991,15 @@ def page_reception():
                         fid_row  = db_tmp.execute("SELECT fournisseur_id FROM livraisons WHERE id=?", (l['id'],)).fetchone()
                         db_tmp.close()
                         fourn_id_add = fid_row['fournisseur_id'] if fid_row else None
+                        # Photo hors form
+                        add_photo_key = f"photo_add_{l['id']}"
+                        new_photo_add = st.file_uploader(
+                            "📷 Photo étiquette (optionnel)",
+                            type=["jpg","jpeg","png"], key=f"up_add_et_{l['id']}"
+                        )
+                        if new_photo_add:
+                            st.image(new_photo_add, width=150)
+                            st.session_state[add_photo_key] = new_photo_add.getvalue()
                         with st.form(f"form_add_prod_{l['id']}"):
                             nom_a = st.text_input("Nom du produit")
                             col_la, col_qa = st.columns(2)
@@ -943,17 +1017,20 @@ def page_reception():
                                 if not nom_a.strip():
                                     st.error("Nom obligatoire.")
                                 else:
+                                    _add_photo_b64 = base64.b64encode(st.session_state[add_photo_key]).decode() if st.session_state.get(add_photo_key) else None
                                     db = conn()
                                     db.execute(
-                                        "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?,?)",
+                                        "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes,photo_etiquette_b64) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                         (l['id'], fourn_id_add, nom_a.strip(), lot_a.strip() or None,
-                                         qte_a.strip() or None, dlc_a, temp_a, conf_a, notes_a or None)
+                                         qte_a.strip() or None, dlc_a, temp_a, conf_a, notes_a or None, _add_photo_b64)
                                     )
                                     db.commit(); db.close()
                                     st.session_state.pop(add_key, None)
+                                    st.session_state.pop(add_photo_key, None)
                                     st.rerun()
                             if do_cancel2:
                                 st.session_state.pop(add_key, None)
+                                st.session_state.pop(add_photo_key, None)
                                 st.rerun()
 
                     # Factures liees
@@ -1009,6 +1086,9 @@ def page_reception():
             if photo_bl:
                 bl_nom     = getattr(photo_bl, "name", "bl.jpg")
                 bl_est_pdf = bl_nom.lower().endswith(".pdf")
+                # Memoriser la photo pour la sauvegarder en base
+                st.session_state.bl_photo_bytes = photo_bl.getvalue()
+                st.session_state.bl_photo_ext   = "pdf" if bl_est_pdf else "jpg"
 
                 if bl_est_pdf:
                     st.info(f"📄 PDF chargé : **{bl_nom}**")
@@ -1142,10 +1222,12 @@ def page_reception():
                 date_rec   = st.date_input("Date de reception", value=date_rec_default)
                 if st.form_submit_button("✅ Valider → Etape suivante"):
                     fourn_id = ids[noms.index(fourn_sel)]
+                    _bl_b64  = base64.b64encode(st.session_state.bl_photo_bytes).decode() if st.session_state.get("bl_photo_bytes") else None
+                    _bl_ext  = st.session_state.get("bl_photo_ext", "jpg")
                     db = conn()
                     cur = db.execute(
-                        "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception) VALUES (?,?,?)",
-                        (fourn_id, numero_bl.strip() or None, date_rec)
+                        "INSERT INTO livraisons (fournisseur_id,numero_bl,date_reception,photo_bl_b64,photo_bl_ext) VALUES (?,?,?,?,?)",
+                        (fourn_id, numero_bl.strip() or None, date_rec, _bl_b64, _bl_ext)
                     )
                     livraison_id = cur.lastrowid
                     db.commit()
@@ -1179,6 +1261,8 @@ def page_reception():
             etiq = st.session_state.get("etiq_data", {})
 
             if photo:
+                # Memoriser la photo pour la sauvegarder en base
+                st.session_state.etiq_photo_bytes = photo.getvalue()
                 st.image(photo, use_container_width=True)
                 if st.button("🤖 Lire l'etiquette", key=f"btn_et_{nb}"):
                     with st.spinner("Lecture en cours..."):
@@ -1219,15 +1303,17 @@ def page_reception():
                     if not nom.strip():
                         st.error("Nom obligatoire.")
                     else:
+                        _etiq_b64 = base64.b64encode(st.session_state.etiq_photo_bytes).decode() if st.session_state.get("etiq_photo_bytes") else None
                         db = conn()
                         db.execute(
-                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?,?)",
+                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes,photo_etiquette_b64) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
-                             nom.strip(), lot.strip() or None, qte.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None)
+                             nom.strip(), lot.strip() or None, qte.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None, _etiq_b64)
                         )
                         db.commit(); db.close()
                         st.session_state.rec_nb_produits += 1
                         st.session_state.pop("etiq_data", None)
+                        st.session_state.pop("etiq_photo_bytes", None)
                         if terminer: st.session_state.rec_step = 3
                         st.rerun()
 
@@ -1408,22 +1494,6 @@ def page_factures():
         st.info("Va dans l'onglet **Config** → section Email pour voir les instructions.")
         return
 
-    # ── Auto-sync au premier chargement de la session ───────────
-    if not st.session_state.get("factures_auto_synced"):
-        st.session_state.factures_auto_synced = True
-        with st.spinner("🔄 Synchronisation automatique Gmail..."):
-            try:
-                result_auto = fetch_factures_gmail(30)
-                if isinstance(result_auto, list) and result_auto:
-                    # On ne garde que les nouvelles (pas deja enregistrees)
-                    deja = {(fac["nom_fichier"], fac["sujet"]) for fac in get_factures()}
-                    nouveaux = [r for r in result_auto
-                                if (r["filename"], r["subject"]) not in deja]
-                    if nouveaux:
-                        st.session_state.factures_found = nouveaux
-            except Exception:
-                pass  # Echec silencieux sur auto-sync
-
     # ── Factures deja enregistrees ──────────────────────────────
     factures_all = get_factures()
 
@@ -1463,10 +1533,18 @@ def page_factures():
                 st.caption(f"Date email : {f['date_email']}")
                 col1, col2 = st.columns(2)
                 with col1:
-                    mime = "application/pdf" if f['nom_fichier'].endswith(".pdf") else "image/jpeg"
+                    _nom = f['nom_fichier'] or ""
+                    if _nom.endswith(".pdf"):
+                        mime = "application/pdf"
+                    elif _nom.endswith(".txt"):
+                        mime = "text/plain"
+                    else:
+                        mime = "image/jpeg"
+                    _b64 = f['contenu_b64']
+                    _bytes = base64.b64decode(_b64) if _b64 else b""
                     st.download_button(
                         "📥 Telecharger",
-                        base64.b64decode(f['contenu_b64']),
+                        _bytes,
                         f['nom_fichier'], mime,
                         key=f"dl_{f['id']}",
                         use_container_width=True
@@ -1613,7 +1691,7 @@ def page_factures():
                                 if detected_nf: found[idx_f]["num_facture"] = detected_nf
                                 # Re-cherche le BL correspondant
                                 for lv in livraisons:
-                                    if lv.get("numero_bl") and detected_bl.lower() in lv["numero_bl"].lower():
+                                    if lv["numero_bl"] and detected_bl.lower() in lv["numero_bl"].lower():
                                         found[idx_f]["livraison_id_auto"] = lv["id"]
                                         break
                                 st.session_state.factures_found = found
