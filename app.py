@@ -35,6 +35,7 @@ st.markdown("""
     }
     .badge-lot { background: #ff4b4b; color: white; border-radius: 8px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600; }
     .badge-dlc { background: #0068c9; color: white; border-radius: 8px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600; }
+    .badge-qte { background: #21a846; color: white; border-radius: 8px; padding: 2px 8px; font-size: 0.8rem; font-weight: 600; }
     .step-indicator { background: #e8f4fd; border-radius: 8px; padding: 0.5rem 1rem; margin-bottom: 1rem; font-weight: 600; color: #0068c9; }
 </style>
 """, unsafe_allow_html=True)
@@ -128,6 +129,7 @@ def init_db():
         "ALTER TABLE produits ADD COLUMN temperature REAL",
         "ALTER TABLE produits ADD COLUMN conformite TEXT DEFAULT 'conforme'",
         "ALTER TABLE produits ADD COLUMN notes TEXT",
+        "ALTER TABLE produits ADD COLUMN quantite TEXT",
     ]:
         try:
             db.execute(migration)
@@ -836,10 +838,12 @@ def page_reception():
                             temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
                             conf = p['conformite'] or "conforme"
                             conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
+                            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
                             st.markdown(f"""<div class="card" style="margin:0.2rem 0;padding:0.5rem 1rem;">
                                 <strong>{p['nom']}</strong><br>
                                 <span class="badge-lot">{lot}</span>&nbsp;
                                 <span class="badge-dlc">{dlc}</span>&nbsp;
+                                {qte_badge}
                                 {f'<small>{temp}</small>' if temp else ''}
                                 <small> {conf_icon} {conf}</small>
                                 {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
@@ -1084,7 +1088,11 @@ def page_reception():
 
             with st.form("form_produit"):
                 nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
-                lot = st.text_input("N° de lot",       value=etiq.get("numero_lot")  or "")
+                col_lot, col_qte = st.columns(2)
+                with col_lot:
+                    lot = st.text_input("N° de lot", value=etiq.get("numero_lot") or "")
+                with col_qte:
+                    qte = st.text_input("Quantite", placeholder="Ex: 5 kg, 3 caisses, 12 unites")
                 dlc_default = date.today()
                 if etiq.get("dlc"):
                     try: dlc_default = datetime.strptime(etiq["dlc"], "%Y-%m-%d").date()
@@ -1108,9 +1116,9 @@ def page_reception():
                     else:
                         db = conn()
                         db.execute(
-                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?)",
+                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes) VALUES (?,?,?,?,?,?,?,?,?)",
                             (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
-                             nom.strip(), lot.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None)
+                             nom.strip(), lot.strip() or None, qte.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None)
                         )
                         db.commit(); db.close()
                         st.session_state.rec_nb_produits += 1
@@ -1155,10 +1163,12 @@ def page_reception():
                     temp = f"🌡️ {p['temperature']}°C" if p['temperature'] is not None else ""
                     conf = p['conformite'] or "conforme"
                     conf_icon = "✅" if conf == "conforme" else ("⚠️" if conf == "avec reserve" else "❌")
+                    qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
                     st.markdown(f"""<div class="card" style="margin:0.3rem 0;padding:0.6rem 1rem;">
                         <strong>{p['nom']}</strong><br>
                         <span class="badge-lot">{lot}</span>&nbsp;
                         <span class="badge-dlc">{dlc}</span>&nbsp;
+                        {qte_badge}
                         {f'<small>{temp}</small>' if temp else ''}
                         <small> {conf_icon} {conf}</small>
                         {f'<br><small><i>{p["notes"]}</i></small>' if p['notes'] else ''}
@@ -1269,11 +1279,13 @@ def page_tracabilite():
         produits = get_produits() if filtre == "Tous" else get_produits(
             next(f["id"] for f in fournisseurs if f["nom"] == filtre))
         for p in produits:
+            qte_badge = f'<span class="badge-qte">📦 {p["quantite"]}</span>&nbsp;' if p.get("quantite") else ""
             st.markdown(f"""<div class="card">
                 <strong>{p['nom']}</strong><br>
                 <span class="badge-lot">LOT: {p['numero_lot'] or '—'}</span>&nbsp;
-                <span class="badge-dlc">DLC: {p['dlc'] or '—'}</span><br>
-                <small>📦 {p['fourn']} • Recu le {p['date_reception'] or '?'}</small>
+                <span class="badge-dlc">DLC: {p['dlc'] or '—'}</span>&nbsp;
+                {qte_badge}<br>
+                <small>🏭 {p['fourn']} • Recu le {p['date_reception'] or '?'}</small>
             </div>""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
