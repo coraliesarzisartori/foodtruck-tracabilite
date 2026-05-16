@@ -60,21 +60,16 @@ _USE_PG = "DATABASE_URL" in st.secrets
 if _USE_PG:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.pool
 
     @st.cache_resource
-    def _pg_state():
-        """Connexion PostgreSQL persistante — créée une seule fois, réutilisée."""
-        return {"conn": None}
-
-    def _get_or_create_pg():
-        state = _pg_state()
-        # Crée uniquement si absente ou fermée — pas de ping à chaque appel
-        if state["conn"] is None or state["conn"].closed:
-            state["conn"] = psycopg2.connect(
-                st.secrets["DATABASE_URL"],
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
-        return state["conn"]
+    def _pg_pool():
+        """Pool de connexions PostgreSQL — créé une fois, connexions réutilisées."""
+        return psycopg2.pool.ThreadedConnectionPool(
+            1, 5,
+            st.secrets["DATABASE_URL"],
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
 
     class _PGCursor:
         """Curseur psycopg2 avec interface sqlite3 (lastrowid)."""
@@ -86,52 +81,31 @@ if _USE_PG:
         def __iter__(self):  return iter(self._cur)
 
     class _PGConn:
-        """Connexion psycopg2 avec interface sqlite3 (?, executescript, commit)."""
+        """Connexion issue du pool — chaque appel conn() a sa propre connexion."""
         def __init__(self):
-            self._c = _get_or_create_pg()
-
-        def _reconnect(self):
-            """Reconnecter si la connexion est morte ou en état d'erreur."""
             try:
-                self._c.rollback()
-                if not self._c.closed:
-                    return  # rollback suffit, connexion OK
+                self._c = _pg_pool().getconn()
             except Exception:
-                pass
-            state = _pg_state()
-            state["conn"] = psycopg2.connect(
-                st.secrets["DATABASE_URL"],
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
-            self._c = state["conn"]
+                # Pool épuisé ou mort → forcer recréation
+                st.cache_resource.clear()
+                self._c = psycopg2.connect(
+                    st.secrets["DATABASE_URL"],
+                    cursor_factory=psycopg2.extras.RealDictCursor
+                )
+            self._returned = False
 
         def execute(self, sql, params=None):
             sql = sql.replace("?", "%s")
             is_insert = sql.strip().upper().startswith("INSERT")
             if is_insert and "RETURNING" not in sql.upper():
                 sql = sql.rstrip("; ") + " RETURNING id"
-
-            for tentative in range(2):
-                try:
-                    cur = self._c.cursor()
-                    cur.execute(sql, params or ())
-                    break  # succès
-                except Exception as e:
-                    msg = str(e).lower()
-                    # Transaction corrompue ou connexion morte → nettoyer et réessayer
-                    if tentative == 0 and (
-                        "infailedsqltransaction" in type(e).__name__.lower()
-                        or "current transaction is aborted" in msg
-                        or "connection" in msg
-                        or self._c.closed
-                    ):
-                        self._reconnect()
-                        continue
-                    # Deuxième échec ou autre erreur → rollback et remonte
-                    try: self._c.rollback()
-                    except Exception: pass
-                    raise
-
+            try:
+                cur = self._c.cursor()
+                cur.execute(sql, params or ())
+            except Exception:
+                try: self._c.rollback()
+                except Exception: pass
+                raise
             last_id = None
             if is_insert:
                 try:
@@ -142,26 +116,39 @@ if _USE_PG:
             return _PGCursor(cur, last_id)
 
         def executescript(self, sql):
-            # Convertit syntaxe SQLite → PostgreSQL
             sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-            cur = self._c.cursor()
             for stmt in (s.strip() for s in sql.split(";") if s.strip()):
                 try:
+                    cur = self._c.cursor()
                     cur.execute(stmt)
                 except Exception:
                     try: self._c.rollback()
                     except Exception: pass
-            self._c.commit()
+            try: self._c.commit()
+            except Exception: pass
 
         def cursor(self, *args, **kwargs):
             return self._c.cursor(*args, **kwargs)
 
         def commit(self):
             self._c.commit()
-            # Invalide tous les caches de lecture après chaque écriture
             st.cache_data.clear()
-        def rollback(self): self._c.rollback()
-        def close(self):    pass  # Connexion partagée, on ne ferme pas
+
+        def rollback(self):
+            try: self._c.rollback()
+            except Exception: pass
+
+        def close(self):
+            if self._returned:
+                return
+            self._returned = True
+            try: self._c.rollback()   # remet la connexion en état propre
+            except Exception: pass
+            try: _pg_pool().putconn(self._c)  # rend la connexion au pool
+            except Exception: pass
+
+        def __del__(self):
+            self.close()  # filet de sécurité si close() oublié
 
 def conn():
     if _USE_PG:
@@ -487,8 +474,7 @@ def ajouter_fournisseur(nom):
         db.rollback()
         return False
 
-@st.cache_data(ttl=60)
-def get_produits(fournisseur_id=None):
+def get_produits(fournisseur_id=None):  # pas de cache — contient photo_etiquette_b64
     db = conn()
     if fournisseur_id:
         rows = db.execute("""
@@ -530,8 +516,7 @@ def rechercher_lot(numero_lot):
     db.close()
     return rows
 
-@st.cache_data(ttl=60)
-def get_livraisons():
+def get_livraisons():  # pas de cache — contient des photos base64 volumineuses
     db = conn()
     rows = db.execute("""
         SELECT l.id, l.numero_bl, l.date_reception, l.temperature, l.conformite, l.notes,
@@ -550,8 +535,7 @@ def get_livraisons():
     db.close()
     return [dict(r) for r in rows]
 
-@st.cache_data(ttl=60)
-def get_produits_livraison(livraison_id):
+def get_produits_livraison(livraison_id):  # pas de cache — contient photo_etiquette_b64
     db = conn()
     rows = db.execute("""
         SELECT * FROM produits WHERE livraison_id = ? ORDER BY created_at ASC
@@ -599,8 +583,7 @@ def sauvegarder_facture(livraison_id, nom_fichier, contenu_b64, expediteur, suje
     db.commit()
     db.close()
 
-@st.cache_data(ttl=60)
-def get_factures(livraison_id=None):
+def get_factures(livraison_id=None):  # pas de cache — contient contenu_b64 (PDFs)
     db = conn()
     if livraison_id:
         rows = db.execute("""
