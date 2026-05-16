@@ -2287,11 +2287,11 @@ EMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"
     st.caption("v2.0 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
-#  PAGE : SAISIE TERRAIN (mobile, sans photo)
+#  PAGE : SAISIE TERRAIN (mobile, caméra directe)
 # ═══════════════════════════════════════════════════════════════
 def page_terrain():
     st.header("📱 Saisie terrain")
-    st.caption("Formulaire rapide — pas besoin de photo")
+    st.caption("📷 Prends tes photos avec la caméra — saisie rapide sur téléphone")
 
     fournisseurs = get_fournisseurs()
     noms = [f["nom"] for f in fournisseurs]
@@ -2301,7 +2301,7 @@ def page_terrain():
     choix_fourn = st.radio("", ["Choisir dans la liste", "Nouveau fournisseur"], horizontal=True, key="tr_choix")
     if choix_fourn == "Choisir dans la liste":
         if not noms:
-            st.warning("Aucun fournisseur. Ajoute-en un ci-dessous.")
+            st.warning("Aucun fournisseur — ajoute-en un ci-dessous.")
             fourn_id, fourn_nom = None, None
         else:
             fourn_nom = st.selectbox("Fournisseur", noms, key="tr_fourn")
@@ -2312,9 +2312,10 @@ def page_terrain():
 
     # ── BL ───────────────────────────────────────────────────────
     st.subheader("2️⃣ Bon de livraison")
-    num_bl   = st.text_input("N° BL (optionnel)", key="tr_bl")
+    photo_bl = st.camera_input("📷 Photo du BL (optionnel)", key="tr_cam_bl")
+    num_bl   = st.text_input("N° BL", key="tr_bl")
     date_liv = st.date_input("Date de réception", value=date.today(), key="tr_date")
-    temp     = st.number_input("Température (°C, optionnel)", value=0.0, step=0.5, key="tr_temp")
+    temp     = st.number_input("Température (°C)", value=0.0, step=0.5, key="tr_temp")
     conf     = st.selectbox("Conformité", ["conforme", "non conforme", "avec reserve"], key="tr_conf")
 
     # ── Produits ─────────────────────────────────────────────────
@@ -2324,11 +2325,12 @@ def page_terrain():
     produits = []
     for i in range(int(nb)):
         with st.expander(f"Produit {i+1}", expanded=(i == 0)):
-            nom_p = st.text_input(f"Nom du produit *", key=f"tr_nom_{i}")
-            lot_p = st.text_input(f"N° lot", key=f"tr_lot_{i}")
-            dlc_p = st.date_input(f"DLC", value=date.today() + timedelta(days=7), key=f"tr_dlc_{i}")
-            qte_p = st.text_input(f"Quantité", key=f"tr_qte_{i}")
-            produits.append({"nom": nom_p, "lot": lot_p, "dlc": dlc_p, "qte": qte_p})
+            photo_etiq = st.camera_input("📷 Photo étiquette", key=f"tr_cam_etiq_{i}")
+            nom_p = st.text_input("Nom du produit *", key=f"tr_nom_{i}")
+            lot_p = st.text_input("N° lot", key=f"tr_lot_{i}")
+            dlc_p = st.date_input("DLC", value=date.today() + timedelta(days=7), key=f"tr_dlc_{i}")
+            qte_p = st.text_input("Quantité", key=f"tr_qte_{i}")
+            produits.append({"nom": nom_p, "lot": lot_p, "dlc": dlc_p, "qte": qte_p, "photo": photo_etiq})
 
     # ── Enregistrer ──────────────────────────────────────────────
     st.divider()
@@ -2353,11 +2355,16 @@ def page_terrain():
                 st.error("❌ Impossible de créer le fournisseur.")
                 return
 
+            # Photo BL en base64
+            bl_b64 = None
+            if photo_bl:
+                bl_b64 = base64.b64encode(photo_bl.getvalue()).decode()
+
             # Créer livraison
             temp_val = float(temp) if temp != 0.0 else None
             cur = db.execute(
-                "INSERT INTO livraisons (fournisseur_id, numero_bl, date_reception, temperature, conformite) VALUES (?,?,?,?,?)",
-                (fourn_id, num_bl or None, str(date_liv), temp_val, conf)
+                "INSERT INTO livraisons (fournisseur_id, numero_bl, date_reception, temperature, conformite, photo_bl_b64, photo_bl_ext) VALUES (?,?,?,?,?,?,?)",
+                (fourn_id, num_bl or None, str(date_liv), temp_val, conf, bl_b64, "jpg" if bl_b64 else None)
             )
             db.commit()
             livraison_id = cur.lastrowid
@@ -2368,10 +2375,11 @@ def page_terrain():
                 if not p["nom"].strip():
                     continue
                 dlc_str = str(p["dlc"]) if p["dlc"] else None
+                etiq_b64 = base64.b64encode(p["photo"].getvalue()).decode() if p["photo"] else None
                 db.execute(
-                    "INSERT INTO produits (livraison_id, fournisseur_id, nom, numero_lot, dlc, quantite) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO produits (livraison_id, fournisseur_id, nom, numero_lot, dlc, quantite, photo_etiquette_b64) VALUES (?,?,?,?,?,?,?)",
                     (livraison_id, fourn_id, p["nom"].strip(),
-                     p["lot"] or None, dlc_str, p["qte"] or None)
+                     p["lot"] or None, dlc_str, p["qte"] or None, etiq_b64)
                 )
                 db.commit()
                 nb_ok += 1
