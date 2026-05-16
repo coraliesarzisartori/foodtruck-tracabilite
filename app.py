@@ -60,39 +60,33 @@ _USE_PG = "DATABASE_URL" in st.secrets
 if _USE_PG:
     import psycopg2
     import psycopg2.extras
-    import psycopg2.pool
 
     @st.cache_resource
-    def _pg_pool():
-        """Pool de connexions PostgreSQL — créé une fois, connexions réutilisées."""
-        return psycopg2.pool.ThreadedConnectionPool(
-            1, 5,
-            st.secrets["DATABASE_URL"],
-            cursor_factory=psycopg2.extras.RealDictCursor
-        )
+    def _pg_store():
+        """Une seule connexion PostgreSQL, partagée entre tous les appels."""
+        return {"conn": None}
+
+    def _get_pg():
+        store = _pg_store()
+        c = store.get("conn")
+        if c is None or c.closed:
+            store["conn"] = psycopg2.connect(
+                st.secrets["DATABASE_URL"],
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+        return store["conn"]
 
     class _PGCursor:
-        """Curseur psycopg2 avec interface sqlite3 (lastrowid)."""
         def __init__(self, cur, last_id=None):
-            self._cur = cur
+            self._cur  = cur
             self.lastrowid = last_id
         def fetchone(self):  return self._cur.fetchone()
         def fetchall(self):  return self._cur.fetchall()
         def __iter__(self):  return iter(self._cur)
 
     class _PGConn:
-        """Connexion issue du pool — chaque appel conn() a sa propre connexion."""
         def __init__(self):
-            try:
-                self._c = _pg_pool().getconn()
-            except Exception:
-                # Pool épuisé ou mort → forcer recréation
-                st.cache_resource.clear()
-                self._c = psycopg2.connect(
-                    st.secrets["DATABASE_URL"],
-                    cursor_factory=psycopg2.extras.RealDictCursor
-                )
-            self._returned = False
+            self._c = _get_pg()
 
         def execute(self, sql, params=None):
             sql = sql.replace("?", "%s")
@@ -119,8 +113,7 @@ if _USE_PG:
             sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
             for stmt in (s.strip() for s in sql.split(";") if s.strip()):
                 try:
-                    cur = self._c.cursor()
-                    cur.execute(stmt)
+                    self._c.cursor().execute(stmt)
                 except Exception:
                     try: self._c.rollback()
                     except Exception: pass
@@ -139,16 +132,7 @@ if _USE_PG:
             except Exception: pass
 
         def close(self):
-            if self._returned:
-                return
-            self._returned = True
-            try: self._c.rollback()   # remet la connexion en état propre
-            except Exception: pass
-            try: _pg_pool().putconn(self._c)  # rend la connexion au pool
-            except Exception: pass
-
-        def __del__(self):
-            self.close()  # filet de sécurité si close() oublié
+            pass  # connexion partagée, on ne ferme pas
 
 def conn():
     if _USE_PG:
