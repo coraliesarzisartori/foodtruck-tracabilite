@@ -68,23 +68,13 @@ if _USE_PG:
 
     def _get_or_create_pg():
         state = _pg_state()
-        try:
-            if state["conn"] is None or state["conn"].closed:
-                raise Exception("no conn")
-            # Ping rapide pour vérifier que la connexion est vivante
-            state["conn"].cursor().execute("SELECT 1")
-            return state["conn"]
-        except Exception:
-            try:
-                if state.get("conn"):
-                    state["conn"].close()
-            except Exception:
-                pass
+        # Crée uniquement si absente ou fermée — pas de ping à chaque appel
+        if state["conn"] is None or state["conn"].closed:
             state["conn"] = psycopg2.connect(
                 st.secrets["DATABASE_URL"],
                 cursor_factory=psycopg2.extras.RealDictCursor
             )
-            return state["conn"]
+        return state["conn"]
 
     class _PGCursor:
         """Curseur psycopg2 avec interface sqlite3 (lastrowid)."""
@@ -134,9 +124,12 @@ if _USE_PG:
         def cursor(self, *args, **kwargs):
             return self._c.cursor(*args, **kwargs)
 
-        def commit(self):   self._c.commit()
+        def commit(self):
+            self._c.commit()
+            # Invalide tous les caches de lecture après chaque écriture
+            st.cache_data.clear()
         def rollback(self): self._c.rollback()
-        def close(self):    self._c.close()
+        def close(self):    pass  # Connexion partagée, on ne ferme pas
 
 def conn():
     if _USE_PG:
@@ -253,7 +246,13 @@ def init_db():
         pass
     db.close()
 
-init_db()
+@st.cache_resource
+def _run_init_db():
+    """init_db() ne tourne qu'une seule fois au démarrage — pas à chaque clic."""
+    init_db()
+    return True
+
+_run_init_db()
 
 # ═══════════════════════════════════════════════════════════════
 #  IA — GPT-4o-mini
@@ -439,11 +438,12 @@ def extraire_texte_pdf(content_bytes):
 # ═══════════════════════════════════════════════════════════════
 #  BASE DE DONNEES — fonctions
 # ═══════════════════════════════════════════════════════════════
+@st.cache_data(ttl=60)
 def get_fournisseurs():
     db = conn()
     rows = db.execute("SELECT * FROM fournisseurs ORDER BY nom").fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def ajouter_fournisseur(nom):
     db = conn()
@@ -456,6 +456,7 @@ def ajouter_fournisseur(nom):
     finally:
         db.close()
 
+@st.cache_data(ttl=60)
 def get_produits(fournisseur_id=None):
     db = conn()
     if fournisseur_id:
@@ -476,7 +477,7 @@ def get_produits(fournisseur_id=None):
             ORDER BY p.created_at DESC
         """).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def rechercher_lot(numero_lot):
     db = conn()
@@ -498,6 +499,7 @@ def rechercher_lot(numero_lot):
     db.close()
     return rows
 
+@st.cache_data(ttl=60)
 def get_livraisons():
     db = conn()
     rows = db.execute("""
@@ -515,15 +517,16 @@ def get_livraisons():
         ORDER BY l.date_reception DESC
     """).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
+@st.cache_data(ttl=60)
 def get_produits_livraison(livraison_id):
     db = conn()
     rows = db.execute("""
         SELECT * FROM produits WHERE livraison_id = ? ORDER BY created_at ASC
     """, (livraison_id,)).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def modifier_produit(produit_id, nom, lot, quantite, dlc, temperature, conformite, notes, photo_b64=None):
     db = conn()
@@ -565,6 +568,7 @@ def sauvegarder_facture(livraison_id, nom_fichier, contenu_b64, expediteur, suje
     db.commit()
     db.close()
 
+@st.cache_data(ttl=60)
 def get_factures(livraison_id=None):
     db = conn()
     if livraison_id:
@@ -585,7 +589,7 @@ def get_factures(livraison_id=None):
             ORDER BY f.created_at DESC
         """).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def supprimer_facture(facture_id):
     db = conn()
@@ -594,11 +598,12 @@ def supprimer_facture(facture_id):
     db.close()
 
 # ── Plats ────────────────────────────────────────────────────────
+@st.cache_data(ttl=60)
 def get_plats():
     db = conn()
     rows = db.execute("SELECT * FROM plats ORDER BY nom").fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def ajouter_plat(nom, dlc_jours, notes=""):
     try:
@@ -622,6 +627,7 @@ def supprimer_plat(plat_id):
     db.commit(); db.close()
 
 # ── Préparations ─────────────────────────────────────────────────
+@st.cache_data(ttl=60)
 def get_preparations():
     db = conn()
     rows = db.execute("""
@@ -637,8 +643,9 @@ def get_preparations():
         ORDER BY prep.date_prep DESC, prep.heure_prep DESC
     """).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
+@st.cache_data(ttl=60)
 def get_produits_preparation(preparation_id):
     db = conn()
     rows = db.execute("""
@@ -651,7 +658,7 @@ def get_produits_preparation(preparation_id):
         ORDER BY p.nom
     """, (preparation_id,)).fetchall()
     db.close()
-    return rows
+    return [dict(r) for r in rows]
 
 def lier_facture_a_livraison(facture_id, livraison_id):
     db = conn()
