@@ -1065,7 +1065,7 @@ def page_reception():
                             st.image(base64.b64decode(_bl_b64), use_container_width=True)
                     new_bl_photo = st.file_uploader(
                         "📷 Ajouter / remplacer la photo BL" if not _bl_b64 else "📷 Remplacer la photo BL",
-                        type=["jpg","jpeg","png","pdf"], key=f"up_bl_histo_{l['id']}"
+                        key=f"up_bl_histo_{l['id']}"
                     )
                     if new_bl_photo:
                         _ext_new = "pdf" if new_bl_photo.name.lower().endswith(".pdf") else "jpg"
@@ -1126,7 +1126,7 @@ def page_reception():
                                 st.image(base64.b64decode(_etiq_b64), width=150)
                             new_photo_e = st.file_uploader(
                                 "📷 Changer la photo étiquette (optionnel)",
-                                type=["jpg","jpeg","png"], key=f"up_edit_et_{p['id']}"
+                                key=f"up_edit_et_{p['id']}"
                             )
                             if new_photo_e:
                                 st.image(new_photo_e, width=150, caption="Nouvelle photo")
@@ -1177,7 +1177,7 @@ def page_reception():
                         add_photo_key = f"photo_add_{l['id']}"
                         new_photo_add = st.file_uploader(
                             "📷 Photo étiquette (optionnel)",
-                            type=["jpg","jpeg","png"], key=f"up_add_et_{l['id']}"
+                            key=f"up_add_et_{l['id']}"
                         )
                         if new_photo_add:
                             st.image(new_photo_add, width=150)
@@ -1262,12 +1262,14 @@ def page_reception():
             photo_bl = st.camera_input("Prends une photo du BL", key="cam_bl")
             if not photo_bl:
                 photo_bl = st.file_uploader("Ou importe depuis la galerie (JPG, PNG, PDF)",
-                                            type=["jpg","jpeg","png","pdf"], key="up_bl")
+                                            key="up_bl")   # sans restriction — Android donne parfois des fichiers sans extension
 
             bl_data = st.session_state.get("bl_data", {})
             if photo_bl:
                 bl_nom     = getattr(photo_bl, "name", "bl.jpg")
-                bl_est_pdf = bl_nom.lower().endswith(".pdf")
+                _content   = photo_bl.getvalue()
+                # Détection PDF depuis le contenu (robuste même sans extension .pdf)
+                bl_est_pdf = bl_nom.lower().endswith(".pdf") or _content[:4] == b"%PDF"
                 # Memoriser la photo pour la sauvegarder en base
                 st.session_state.bl_photo_bytes = photo_bl.getvalue()
                 st.session_state.bl_photo_ext   = "pdf" if bl_est_pdf else "jpg"
@@ -1305,7 +1307,7 @@ def page_reception():
                     st.image(fac_photo, use_container_width=True)
 
             elif facture_source == "Fichier PDF/image":
-                fac_file = st.file_uploader("Importe la facture", type=["pdf","jpg","jpeg","png"], key="up_fac")
+                fac_file = st.file_uploader("Importe la facture", key="up_fac")
                 if fac_file:
                     facture_bytes = fac_file.getvalue()
                     facture_name  = fac_file.name
@@ -1479,7 +1481,7 @@ def page_reception():
             # Photo étiquette (optionnelle si produit déjà connu via BL)
             photo = st.camera_input("📷 Photo de l'étiquette", key=f"cam_et_{bl_idx}")
             if not photo:
-                photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{bl_idx}")
+                photo = st.file_uploader("Ou depuis la galerie", key=f"up_et_{bl_idx}")
 
             etiq = st.session_state.get("etiq_data", {})
 
