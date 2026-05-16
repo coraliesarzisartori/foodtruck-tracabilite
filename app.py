@@ -90,17 +90,48 @@ if _USE_PG:
         def __init__(self):
             self._c = _get_or_create_pg()
 
+        def _reconnect(self):
+            """Reconnecter si la connexion est morte ou en état d'erreur."""
+            try:
+                self._c.rollback()
+                if not self._c.closed:
+                    return  # rollback suffit, connexion OK
+            except Exception:
+                pass
+            state = _pg_state()
+            state["conn"] = psycopg2.connect(
+                st.secrets["DATABASE_URL"],
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+            self._c = state["conn"]
+
         def execute(self, sql, params=None):
             sql = sql.replace("?", "%s")
             is_insert = sql.strip().upper().startswith("INSERT")
             if is_insert and "RETURNING" not in sql.upper():
                 sql = sql.rstrip("; ") + " RETURNING id"
-            cur = self._c.cursor()
-            try:
-                cur.execute(sql, params or ())
-            except Exception:
-                self._c.rollback()
-                raise
+
+            for tentative in range(2):
+                try:
+                    cur = self._c.cursor()
+                    cur.execute(sql, params or ())
+                    break  # succès
+                except Exception as e:
+                    msg = str(e).lower()
+                    # Transaction corrompue ou connexion morte → nettoyer et réessayer
+                    if tentative == 0 and (
+                        "infailedsqltransaction" in type(e).__name__.lower()
+                        or "current transaction is aborted" in msg
+                        or "connection" in msg
+                        or self._c.closed
+                    ):
+                        self._reconnect()
+                        continue
+                    # Deuxième échec ou autre erreur → rollback et remonte
+                    try: self._c.rollback()
+                    except Exception: pass
+                    raise
+
             last_id = None
             if is_insert:
                 try:
@@ -118,7 +149,8 @@ if _USE_PG:
                 try:
                     cur.execute(stmt)
                 except Exception:
-                    self._c.rollback()
+                    try: self._c.rollback()
+                    except Exception: pass
             self._c.commit()
 
         def cursor(self, *args, **kwargs):
@@ -452,9 +484,8 @@ def ajouter_fournisseur(nom):
         db.commit()
         return True
     except Exception:
+        db.rollback()
         return False
-    finally:
-        db.close()
 
 @st.cache_data(ttl=60)
 def get_produits(fournisseur_id=None):
