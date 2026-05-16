@@ -1268,8 +1268,8 @@ def page_reception():
             # --- Formulaire livraison ---
             fournisseurs = get_fournisseurs()
             if not fournisseurs:
-                st.warning("Aucun fournisseur. Va dans Config pour en ajouter.")
-                st.stop()
+                st.warning("⚠️ Aucun fournisseur enregistré. Va dans l'onglet **⚙️ Config** pour en ajouter.")
+                return
 
             noms = [f["nom"] for f in fournisseurs]
             ids  = [f["id"]  for f in fournisseurs]
