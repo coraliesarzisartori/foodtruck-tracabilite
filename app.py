@@ -597,11 +597,14 @@ def get_preparations():
     db = conn()
     rows = db.execute("""
         SELECT prep.*, pl.nom AS plat_nom_fiche, pl.dlc_jours,
-               COUNT(pp.produit_id) AS nb_produits
+               COALESCE(cnt.nb_produits, 0) AS nb_produits
         FROM preparations prep
         LEFT JOIN plats pl ON prep.plat_id = pl.id
-        LEFT JOIN preparation_produits pp ON prep.id = pp.preparation_id
-        GROUP BY prep.id
+        LEFT JOIN (
+            SELECT preparation_id, COUNT(*) AS nb_produits
+            FROM preparation_produits
+            GROUP BY preparation_id
+        ) cnt ON prep.id = cnt.preparation_id
         ORDER BY prep.date_prep DESC, prep.heure_prep DESC
     """).fetchall()
     db.close()
