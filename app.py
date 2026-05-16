@@ -61,6 +61,31 @@ if _USE_PG:
     import psycopg2
     import psycopg2.extras
 
+    @st.cache_resource
+    def _pg_state():
+        """Connexion PostgreSQL persistante — créée une seule fois, réutilisée."""
+        return {"conn": None}
+
+    def _get_or_create_pg():
+        state = _pg_state()
+        try:
+            if state["conn"] is None or state["conn"].closed:
+                raise Exception("no conn")
+            # Ping rapide pour vérifier que la connexion est vivante
+            state["conn"].cursor().execute("SELECT 1")
+            return state["conn"]
+        except Exception:
+            try:
+                if state.get("conn"):
+                    state["conn"].close()
+            except Exception:
+                pass
+            state["conn"] = psycopg2.connect(
+                st.secrets["DATABASE_URL"],
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+            return state["conn"]
+
     class _PGCursor:
         """Curseur psycopg2 avec interface sqlite3 (lastrowid)."""
         def __init__(self, cur, last_id=None):
@@ -73,10 +98,7 @@ if _USE_PG:
     class _PGConn:
         """Connexion psycopg2 avec interface sqlite3 (?, executescript, commit)."""
         def __init__(self):
-            self._c = psycopg2.connect(
-                st.secrets["DATABASE_URL"],
-                cursor_factory=psycopg2.extras.RealDictCursor
-            )
+            self._c = _get_or_create_pg()
 
         def execute(self, sql, params=None):
             sql = sql.replace("?", "%s")
@@ -1362,9 +1384,20 @@ def page_reception():
             ids  = [f["id"]  for f in fournisseurs]
             default = 0
             if bl_data.get("fournisseur"):
+                detected = bl_data["fournisseur"].lower()
+                best_score = 0
                 for i, n in enumerate(noms):
-                    if bl_data["fournisseur"].lower() in n.lower():
-                        default = i; break
+                    nl = n.lower()
+                    # Score : mots en commun entre le nom GPT et le nom DB
+                    mots_db  = set(w for w in nl.split() if len(w) > 2)
+                    mots_gpt = set(w for w in detected.split() if len(w) > 2)
+                    score = len(mots_db & mots_gpt)
+                    # Bonus si l'un contient l'autre
+                    if nl in detected or detected in nl:
+                        score += 5
+                    if score > best_score:
+                        best_score = score
+                        default = i
 
             with st.form("form_bl"):
                 st.markdown("**📝 Informations livraison**")
