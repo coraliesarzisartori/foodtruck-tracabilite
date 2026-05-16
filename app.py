@@ -2287,10 +2287,109 @@ EMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"
     st.caption("v2.0 — FoodTruck Tracabilite HACCP")
 
 # ═══════════════════════════════════════════════════════════════
+#  PAGE : SAISIE TERRAIN (mobile, sans photo)
+# ═══════════════════════════════════════════════════════════════
+def page_terrain():
+    st.header("📱 Saisie terrain")
+    st.caption("Formulaire rapide — pas besoin de photo")
+
+    fournisseurs = get_fournisseurs()
+    noms = [f["nom"] for f in fournisseurs]
+
+    # ── Fournisseur ──────────────────────────────────────────────
+    st.subheader("1️⃣ Fournisseur")
+    choix_fourn = st.radio("", ["Choisir dans la liste", "Nouveau fournisseur"], horizontal=True, key="tr_choix")
+    if choix_fourn == "Choisir dans la liste":
+        if not noms:
+            st.warning("Aucun fournisseur. Ajoute-en un ci-dessous.")
+            fourn_id, fourn_nom = None, None
+        else:
+            fourn_nom = st.selectbox("Fournisseur", noms, key="tr_fourn")
+            fourn_id  = next(f["id"] for f in fournisseurs if f["nom"] == fourn_nom)
+    else:
+        nouveau_nom = st.text_input("Nom du nouveau fournisseur", key="tr_newfourn")
+        fourn_id, fourn_nom = None, nouveau_nom
+
+    # ── BL ───────────────────────────────────────────────────────
+    st.subheader("2️⃣ Bon de livraison")
+    num_bl   = st.text_input("N° BL (optionnel)", key="tr_bl")
+    date_liv = st.date_input("Date de réception", value=date.today(), key="tr_date")
+    temp     = st.number_input("Température (°C, optionnel)", value=0.0, step=0.5, key="tr_temp")
+    conf     = st.selectbox("Conformité", ["conforme", "non conforme", "avec reserve"], key="tr_conf")
+
+    # ── Produits ─────────────────────────────────────────────────
+    st.subheader("3️⃣ Produits")
+    nb = st.number_input("Combien de produits ?", min_value=1, max_value=20, value=1, step=1, key="tr_nb")
+
+    produits = []
+    for i in range(int(nb)):
+        with st.expander(f"Produit {i+1}", expanded=(i == 0)):
+            nom_p = st.text_input(f"Nom du produit *", key=f"tr_nom_{i}")
+            lot_p = st.text_input(f"N° lot", key=f"tr_lot_{i}")
+            dlc_p = st.date_input(f"DLC", value=date.today() + timedelta(days=7), key=f"tr_dlc_{i}")
+            qte_p = st.text_input(f"Quantité", key=f"tr_qte_{i}")
+            produits.append({"nom": nom_p, "lot": lot_p, "dlc": dlc_p, "qte": qte_p})
+
+    # ── Enregistrer ──────────────────────────────────────────────
+    st.divider()
+    if st.button("✅ Enregistrer la livraison", use_container_width=True, type="primary"):
+        if not fourn_nom:
+            st.error("❌ Choisis ou saisis un fournisseur.")
+            return
+
+        db = conn()
+        try:
+            # Créer fournisseur si nouveau
+            if fourn_id is None and fourn_nom:
+                try:
+                    cur = db.execute("INSERT INTO fournisseurs (nom) VALUES (?)", (fourn_nom,))
+                    db.commit()
+                    fourn_id = cur.lastrowid
+                except Exception:
+                    row = db.execute("SELECT id FROM fournisseurs WHERE nom=?", (fourn_nom,)).fetchone()
+                    fourn_id = row["id"] if row else None
+
+            if not fourn_id:
+                st.error("❌ Impossible de créer le fournisseur.")
+                return
+
+            # Créer livraison
+            temp_val = float(temp) if temp != 0.0 else None
+            cur = db.execute(
+                "INSERT INTO livraisons (fournisseur_id, numero_bl, date_reception, temperature, conformite) VALUES (?,?,?,?,?)",
+                (fourn_id, num_bl or None, str(date_liv), temp_val, conf)
+            )
+            db.commit()
+            livraison_id = cur.lastrowid
+
+            # Créer produits
+            nb_ok = 0
+            for p in produits:
+                if not p["nom"].strip():
+                    continue
+                dlc_str = str(p["dlc"]) if p["dlc"] else None
+                db.execute(
+                    "INSERT INTO produits (livraison_id, fournisseur_id, nom, numero_lot, dlc, quantite) VALUES (?,?,?,?,?,?)",
+                    (livraison_id, fourn_id, p["nom"].strip(),
+                     p["lot"] or None, dlc_str, p["qte"] or None)
+                )
+                db.commit()
+                nb_ok += 1
+
+            st.success(f"✅ Livraison enregistrée ! {nb_ok} produit(s) sauvegardé(s).")
+            st.balloons()
+
+        except Exception as e:
+            st.error(f"❌ Erreur : {e}")
+        finally:
+            db.close()
+
+# ═══════════════════════════════════════════════════════════════
 #  NAVIGATION
 # ═══════════════════════════════════════════════════════════════
 def main():
-    t1, t2, t3, t4, t5 = st.tabs(["📦 Reception", "👨‍🍳 Prepa", "🔍 Traca", "📧 Factures", "⚙️ Config"])
+    t0, t1, t2, t3, t4, t5 = st.tabs(["📱 Terrain", "📦 Reception", "👨‍🍳 Prepa", "🔍 Traca", "📧 Factures", "⚙️ Config"])
+    with t0: page_terrain()
     with t1: page_reception()
     with t2: page_preparation()
     with t3: page_tracabilite()
