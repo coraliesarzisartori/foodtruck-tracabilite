@@ -2312,7 +2312,13 @@ def page_terrain():
 
     # ── BL ───────────────────────────────────────────────────────
     st.subheader("2️⃣ Bon de livraison")
-    photo_bl = st.camera_input("📷 Photo du BL (optionnel)", key="tr_cam_bl")
+    col_cam, col_gal = st.columns(2)
+    with col_cam:
+        photo_bl_cam = st.camera_input("📷 Prendre une photo", key="tr_cam_bl")
+    with col_gal:
+        photo_bl_gal = st.file_uploader("🖼️ Depuis la galerie", key="tr_gal_bl")
+    photo_bl = photo_bl_cam or photo_bl_gal
+
     num_bl   = st.text_input("N° BL", key="tr_bl")
     date_liv = st.date_input("Date de réception", value=date.today(), key="tr_date")
     temp     = st.number_input("Température (°C)", value=0.0, step=0.5, key="tr_temp")
@@ -2325,7 +2331,12 @@ def page_terrain():
     produits = []
     for i in range(int(nb)):
         with st.expander(f"Produit {i+1}", expanded=(i == 0)):
-            photo_etiq = st.camera_input("📷 Photo étiquette", key=f"tr_cam_etiq_{i}")
+            col_c, col_g = st.columns(2)
+            with col_c:
+                etiq_cam = st.camera_input("📷 Prendre une photo", key=f"tr_cam_etiq_{i}")
+            with col_g:
+                etiq_gal = st.file_uploader("🖼️ Depuis la galerie", key=f"tr_gal_etiq_{i}")
+            photo_etiq = etiq_cam or etiq_gal
             nom_p = st.text_input("Nom du produit *", key=f"tr_nom_{i}")
             lot_p = st.text_input("N° lot", key=f"tr_lot_{i}")
             dlc_p = st.date_input("DLC", value=date.today() + timedelta(days=7), key=f"tr_dlc_{i}")
