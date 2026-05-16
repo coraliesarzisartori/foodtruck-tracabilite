@@ -51,11 +51,73 @@ except Exception:
     AI_OK = False
 
 # ═══════════════════════════════════════════════════════════════
-#  BASE DE DONNEES
+#  BASE DE DONNEES  (PostgreSQL si DATABASE_URL, sinon SQLite local)
 # ═══════════════════════════════════════════════════════════════
 DB = "tracabilite.db"
+_USE_PG = "DATABASE_URL" in st.secrets
+
+if _USE_PG:
+    import psycopg2
+    import psycopg2.extras
+
+    class _PGCursor:
+        """Curseur psycopg2 avec interface sqlite3 (lastrowid)."""
+        def __init__(self, cur, last_id=None):
+            self._cur = cur
+            self.lastrowid = last_id
+        def fetchone(self):  return self._cur.fetchone()
+        def fetchall(self):  return self._cur.fetchall()
+        def __iter__(self):  return iter(self._cur)
+
+    class _PGConn:
+        """Connexion psycopg2 avec interface sqlite3 (?, executescript, commit)."""
+        def __init__(self):
+            self._c = psycopg2.connect(
+                st.secrets["DATABASE_URL"],
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+
+        def execute(self, sql, params=None):
+            sql = sql.replace("?", "%s")
+            is_insert = sql.strip().upper().startswith("INSERT")
+            if is_insert and "RETURNING" not in sql.upper():
+                sql = sql.rstrip("; ") + " RETURNING id"
+            cur = self._c.cursor()
+            try:
+                cur.execute(sql, params or ())
+            except Exception:
+                self._c.rollback()
+                raise
+            last_id = None
+            if is_insert:
+                try:
+                    row = cur.fetchone()
+                    last_id = row["id"] if row else None
+                except Exception:
+                    pass
+            return _PGCursor(cur, last_id)
+
+        def executescript(self, sql):
+            # Convertit syntaxe SQLite → PostgreSQL
+            sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+            cur = self._c.cursor()
+            for stmt in (s.strip() for s in sql.split(";") if s.strip()):
+                try:
+                    cur.execute(stmt)
+                except Exception:
+                    self._c.rollback()
+            self._c.commit()
+
+        def cursor(self, *args, **kwargs):
+            return self._c.cursor(*args, **kwargs)
+
+        def commit(self):   self._c.commit()
+        def rollback(self): self._c.rollback()
+        def close(self):    self._c.close()
 
 def conn():
+    if _USE_PG:
+        return _PGConn()
     c = sqlite3.connect(DB, check_same_thread=False)
     c.row_factory = sqlite3.Row
     return c
@@ -1990,6 +2052,31 @@ PROGINOV_PASSWORD = "ton_mot_de_passe_proginov"
             # Remet a zero l'auto-sync pour qu'il se relance avec les nouveaux filtres
             st.session_state.pop("factures_auto_synced", None)
             st.success("✅ Filtres mis a jour ! La prochaine synchro utilisera ces mots-cles.")
+
+    st.divider()
+    st.subheader("💾 Base de données persistante (Neon)")
+    if _USE_PG:
+        st.success("✅ Base PostgreSQL connectée — tes données sont sauvegardées en permanence !")
+    else:
+        st.warning("⚠️ Base SQLite locale — les données sont perdues à chaque mise à jour du code.")
+        st.markdown("""
+**Pour ne plus perdre tes données, connecte une base Neon (gratuit) :**
+
+**1. Crée un compte gratuit** → [neon.tech](https://neon.tech) (bouton "Sign up", c'est gratuit)
+
+**2. Crée un projet** → clique "New Project", choisis un nom (ex: foodtruck), région Europe
+
+**3. Copie la "Connection string"** → dans ton projet Neon, onglet "Connection Details"
+→ Copie le texte qui commence par `postgresql://...`
+
+**4. Dans Streamlit Cloud**, va dans ton app → ⋮ → Settings → Secrets et ajoute :
+```
+DATABASE_URL = "postgresql://..."
+```
+_(colle ici ta connection string Neon)_
+
+**5. Redémarre l'app** → tes données seront sauvegardées pour toujours !
+        """)
 
     st.divider()
     st.subheader("📧 Email (Factures Gmail)")
