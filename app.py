@@ -481,9 +481,15 @@ def get_livraisons():
     rows = db.execute("""
         SELECT l.id, l.numero_bl, l.date_reception, l.temperature, l.conformite, l.notes,
                l.photo_bl_b64, l.photo_bl_ext,
-               f.nom AS nom_fourn
+               f.nom AS nom_fourn,
+               COALESCE(cnt.nb_produits, 0) AS nb_produits
         FROM livraisons l
         JOIN fournisseurs f ON l.fournisseur_id = f.id
+        LEFT JOIN (
+            SELECT livraison_id, COUNT(*) AS nb_produits
+            FROM produits
+            GROUP BY livraison_id
+        ) cnt ON l.id = cnt.livraison_id
         ORDER BY l.date_reception DESC
     """).fetchall()
     db.close()
@@ -655,6 +661,21 @@ def supprimer_livraison(livraison_id):
     db.execute("DELETE FROM livraisons WHERE id=?",          (livraison_id,))
     db.commit()
     db.close()
+
+def supprimer_fournisseur(fourn_id):
+    """Supprime un fournisseur — retourne (ok, message)."""
+    db = conn()
+    cnt_liv  = db.execute("SELECT COUNT(*) AS cnt FROM livraisons WHERE fournisseur_id=?", (fourn_id,)).fetchone()
+    cnt_prod = db.execute("SELECT COUNT(*) AS cnt FROM produits   WHERE fournisseur_id=?", (fourn_id,)).fetchone()
+    nb_liv  = cnt_liv["cnt"]  if cnt_liv  else 0
+    nb_prod = cnt_prod["cnt"] if cnt_prod else 0
+    if nb_liv > 0 or nb_prod > 0:
+        db.close()
+        return False, f"{nb_liv} livraison(s) et {nb_prod} produit(s) liés — supprime-les d'abord"
+    db.execute("DELETE FROM fournisseurs WHERE id=?", (fourn_id,))
+    db.commit()
+    db.close()
+    return True, ""
 
 # ═══════════════════════════════════════════════════════════════
 #  PROGINOV — telechargement automatique
@@ -988,7 +1009,7 @@ def page_reception():
         else:
             st.write(f"**{len(livraisons)} livraison(s) enregistree(s)**")
             for l in livraisons:
-                nb_produits = len(get_produits_livraison(l['id']))
+                nb_produits = l['nb_produits']
                 bl_label    = l['numero_bl'] if l['numero_bl'] else "N° BL non renseigne"
                 conf_icon   = "✅" if l['conformite'] == "conforme" else ("⚠️" if l['conformite'] == "avec reserve" else "❌")
                 with st.expander(f"{conf_icon}  {bl_label}  •  {l['nom_fourn']}  •  {l['date_reception']}  ({nb_produits} produit(s))"):
@@ -1377,28 +1398,57 @@ def page_reception():
                     st.session_state.rec_livraison_id   = livraison_id
                     st.session_state.rec_fournisseur_id = fourn_id
                     st.session_state.rec_nb_produits    = 0
+                    st.session_state.rec_bl_idx         = 0
                     st.session_state.rec_step           = 2
                     st.rerun()
 
         # ── ETAPE 2 : Étiquettes produits ────────────────────────
         elif step == 2:
-            nb = st.session_state.get("rec_nb_produits", 0)
-            st.markdown(f'<div class="step-indicator">🏷️ Etape 2 / 3 — Produits ({nb} enregistre{"s" if nb>1 else ""})</div>', unsafe_allow_html=True)
+            nb      = st.session_state.get("rec_nb_produits", 0)
+            bl_idx  = st.session_state.get("rec_bl_idx", 0)
 
-            if nb > 0:
-                st.info(f"✅ {nb} produit(s) deja enregistre(s) — photo de l'etiquette suivante ou termine.")
+            # Produits détectés par GPT dans le BL (étape 1)
+            bl_produits = [p for p in (st.session_state.get("bl_data", {}).get("produits") or [])
+                           if p and p.get("nom")]
+            total_bl = len(bl_produits)
 
-            photo = st.camera_input("📷 Photo de l'etiquette", key=f"cam_et_{nb}")
+            # Indicateur de progression
+            if total_bl > 0:
+                st.markdown(
+                    f'<div class="step-indicator">🏷️ Étape 2/3 — Produit {min(bl_idx+1, total_bl)}/{total_bl}'
+                    f' &nbsp;·&nbsp; {nb} enregistré(s)</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f'<div class="step-indicator">🏷️ Étape 2/3 — Produits ({nb} enregistré{"s" if nb>1 else ""})</div>',
+                    unsafe_allow_html=True
+                )
+
+            # Produit courant depuis le BL GPT
+            bl_prod = bl_produits[bl_idx] if bl_idx < total_bl else {}
+            pre_nom = bl_prod.get("nom") or ""
+            pre_qte = bl_prod.get("quantite") or ""
+
+            # Bannière si produit pré-détecté depuis le BL
+            if bl_prod:
+                st.info(f"🤖 Produit détecté dans le BL : **{pre_nom}**"
+                        + (f"  ·  Qté : {pre_qte}" if pre_qte else ""))
+                st.caption("📷 Photo de l'étiquette pour compléter le n° de lot et la DLC — ou saisis manuellement.")
+            elif nb > 0:
+                st.info(f"✅ {nb} produit(s) enregistré(s) — ajoute le suivant ou termine.")
+
+            # Photo étiquette (optionnelle si produit déjà connu via BL)
+            photo = st.camera_input("📷 Photo de l'étiquette", key=f"cam_et_{bl_idx}")
             if not photo:
-                photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{nb}")
+                photo = st.file_uploader("Ou depuis la galerie", type=["jpg","jpeg","png"], key=f"up_et_{bl_idx}")
 
             etiq = st.session_state.get("etiq_data", {})
 
             if photo:
-                # Memoriser la photo pour la sauvegarder en base
                 st.session_state.etiq_photo_bytes = photo.getvalue()
                 st.image(photo, use_container_width=True)
-                if st.button("🤖 Lire l'etiquette", key=f"btn_et_{nb}"):
+                if st.button("🤖 Lire l'étiquette", key=f"btn_et_{bl_idx}"):
                     with st.spinner("Lecture en cours..."):
                         data = lire_etiquette(photo.getvalue())
                     if data and "erreur" not in data:
@@ -1410,12 +1460,15 @@ def page_reception():
                         st.error(data.get("erreur","Erreur") if data else "Erreur")
 
             with st.form("form_produit"):
-                nom = st.text_input("Nom du produit", value=etiq.get("nom_produit") or "")
+                # Priorité : GPT étiquette > pré-rempli BL > vide
+                nom = st.text_input("Nom du produit *",
+                                    value=etiq.get("nom_produit") or pre_nom)
                 col_lot, col_qte = st.columns(2)
                 with col_lot:
                     lot = st.text_input("N° de lot", value=etiq.get("numero_lot") or "")
                 with col_qte:
-                    qte = st.text_input("Quantite", placeholder="Ex: 5 kg, 3 caisses, 12 unites")
+                    qte = st.text_input("Quantité", value=pre_qte,
+                                        placeholder="Ex: 5 kg, 3 caisses")
                 dlc_default = date.today()
                 if etiq.get("dlc"):
                     try: dlc_default = datetime.strptime(etiq["dlc"], "%Y-%m-%d").date()
@@ -1424,36 +1477,66 @@ def page_reception():
 
                 col_t, col_c = st.columns(2)
                 with col_t:
-                    temp_prod = st.number_input("🌡️ Temperature (°C)", value=4.0, step=0.5)
+                    temp_prod = st.number_input("🌡️ Température (°C)", value=4.0, step=0.5)
                 with col_c:
-                    conf_prod = st.selectbox("Conformite", ["conforme","non conforme","avec reserve"])
+                    conf_prod = st.selectbox("Conformité", ["conforme","non conforme","avec reserve"])
                 notes_prod = st.text_area("Notes", placeholder="Aspect, odeur, emballage...")
 
-                col1, col2 = st.columns(2)
-                with col1: encore   = st.form_submit_button("💾 + Produit suivant")
-                with col2: terminer = st.form_submit_button("✅ Terminer")
+                # Boutons selon contexte
+                a_suivant = total_bl > 0 and bl_idx < total_bl - 1
+                if a_suivant:
+                    c1, c2, c3 = st.columns(3)
+                    with c1: encore   = st.form_submit_button("💾 Enregistrer", use_container_width=True)
+                    with c2: terminer = st.form_submit_button("✅ Terminer",    use_container_width=True)
+                    with c3: passer   = st.form_submit_button("⏭️ Passer",      use_container_width=True)
+                else:
+                    c1, c2 = st.columns(2)
+                    with c1: encore   = st.form_submit_button("💾 + Produit suivant", use_container_width=True)
+                    with c2: terminer = st.form_submit_button("✅ Terminer",           use_container_width=True)
+                    passer = False
 
+                # ── Passer ce produit (sans enregistrer) ──
+                if passer:
+                    st.session_state.rec_bl_idx = bl_idx + 1
+                    st.session_state.pop("etiq_data", None)
+                    st.session_state.pop("etiq_photo_bytes", None)
+                    st.rerun()
+
+                # ── Enregistrer ──
                 if encore or terminer:
                     if not nom.strip():
-                        st.error("Nom obligatoire.")
+                        st.error("⚠️ Le nom du produit est obligatoire.")
                     else:
-                        _etiq_b64 = base64.b64encode(st.session_state.etiq_photo_bytes).decode() if st.session_state.get("etiq_photo_bytes") else None
+                        _etiq_b64 = base64.b64encode(st.session_state.etiq_photo_bytes).decode() \
+                                    if st.session_state.get("etiq_photo_bytes") else None
                         db = conn()
                         db.execute(
-                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,dlc,temperature,conformite,notes,photo_etiquette_b64) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            "INSERT INTO produits (livraison_id,fournisseur_id,nom,numero_lot,quantite,"
+                            "dlc,temperature,conformite,notes,photo_etiquette_b64) VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (st.session_state.rec_livraison_id, st.session_state.rec_fournisseur_id,
-                             nom.strip(), lot.strip() or None, qte.strip() or None, dlc, temp_prod, conf_prod, notes_prod or None, _etiq_b64)
+                             nom.strip(), lot.strip() or None, qte.strip() or None,
+                             dlc, temp_prod, conf_prod, notes_prod or None, _etiq_b64)
                         )
                         db.commit(); db.close()
                         st.session_state.rec_nb_produits += 1
+                        st.session_state.rec_bl_idx = bl_idx + 1
                         st.session_state.pop("etiq_data", None)
                         st.session_state.pop("etiq_photo_bytes", None)
-                        if terminer: st.session_state.rec_step = 3
+                        if terminer:
+                            st.session_state.rec_step = 3
                         st.rerun()
 
-            if st.button("➡️ Terminer sans ajouter de produit"):
-                st.session_state.rec_step = 3
-                st.rerun()
+            # Auto-suggestion de passer à l'étape 3 quand tous les produits BL sont traités
+            if total_bl > 0 and bl_idx >= total_bl:
+                st.success(f"🎉 Tous les {total_bl} produits du BL ont été traités !")
+                if st.button("➡️ Voir le récap", use_container_width=True):
+                    st.session_state.rec_step = 3
+                    st.rerun()
+            else:
+                lbl = "➡️ Terminer sans ajouter de produit" if nb == 0 else "➡️ Terminer"
+                if st.button(lbl, use_container_width=True):
+                    st.session_state.rec_step = 3
+                    st.rerun()
 
         # ── ETAPE 3 : Récap dossier BL ───────────────────────────
         elif step == 3:
@@ -1512,7 +1595,8 @@ def page_reception():
 
             st.success("🎉 Dossier HACCP complet !")
             if st.button("📦 Nouvelle reception", use_container_width=True):
-                for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits","bl_data","etiq_data"]:
+                for k in ["rec_step","rec_livraison_id","rec_fournisseur_id","rec_nb_produits",
+                          "rec_bl_idx","bl_data","etiq_data","bl_photo_bytes","bl_photo_ext"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
@@ -2009,18 +2093,46 @@ def page_config():
                 st.error("Nom obligatoire.")
 
     st.divider()
-    st.subheader("Fournisseurs")
-    for f in get_fournisseurs():
-        st.write(f"• {f['nom']}")
+    st.subheader("🏭 Fournisseurs")
+    fournisseurs_list = get_fournisseurs()
+    if fournisseurs_list:
+        for f in fournisseurs_list:
+            del_key_f = f"confirm_del_fourn_{f['id']}"
+            col_nom, col_btn = st.columns([5, 1])
+            with col_nom:
+                st.write(f"• **{f['nom']}**")
+            with col_btn:
+                if not st.session_state.get(del_key_f):
+                    if st.button("🗑️", key=f"del_fourn_{f['id']}", use_container_width=True,
+                                 help="Supprimer ce fournisseur"):
+                        st.session_state[del_key_f] = True
+                        st.rerun()
+                else:
+                    st.warning(f"Supprimer **{f['nom']}** ?")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("✅ Oui", key=f"yes_fourn_{f['id']}", use_container_width=True):
+                            ok, msg = supprimer_fournisseur(f['id'])
+                            if ok:
+                                st.session_state.pop(del_key_f, None)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Impossible : {msg}")
+                    with c2:
+                        if st.button("❌ Non", key=f"no_fourn_{f['id']}", use_container_width=True):
+                            st.session_state.pop(del_key_f, None)
+                            st.rerun()
+    else:
+        st.info("Aucun fournisseur enregistré.")
 
     with st.form("add_fourn"):
-        nouveau = st.text_input("Ajouter un fournisseur")
-        if st.form_submit_button("Ajouter"):
+        nouveau = st.text_input("➕ Ajouter un fournisseur")
+        if st.form_submit_button("Ajouter", use_container_width=True):
             if nouveau.strip():
                 if ajouter_fournisseur(nouveau.strip()):
-                    st.success(f"✅ {nouveau} ajoute !"); st.rerun()
+                    st.success(f"✅ {nouveau} ajouté !"); st.rerun()
                 else:
-                    st.error("Fournisseur existe deja.")
+                    st.error("Fournisseur existe déjà.")
 
     st.divider()
     st.subheader("🤖 IA")
